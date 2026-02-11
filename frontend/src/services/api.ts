@@ -2,25 +2,38 @@ import axios from 'axios';
 
 const resolveApiBaseUrl = (): string => {
   if (process.env.REACT_APP_API_BASE_URL) {
-    return process.env.REACT_APP_API_BASE_URL;
+    return process.env.REACT_APP_API_BASE_URL.replace(/\/+$/, '');
   }
 
   if (typeof window !== 'undefined') {
     const { protocol, hostname } = window.location;
-    return `${protocol}//${hostname}:8000/api`;
+    const isLocalHost = hostname === 'localhost' || hostname === '127.0.0.1';
+    if (isLocalHost) {
+      return `${protocol}//${hostname}:8000/api`;
+    }
+    return '/api';
   }
 
   return 'http://localhost:8000/api';
 };
 
+const resolveApiTimeoutMs = (): number => {
+  const parsed = Number(process.env.REACT_APP_API_TIMEOUT_MS || '');
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed;
+  }
+  return 90000;
+};
+
 const API_BASE_URL = resolveApiBaseUrl();
+const API_TIMEOUT_MS = resolveApiTimeoutMs();
 
 const api = axios.create({
   baseURL: API_BASE_URL,
   headers: {
     'Content-Type': 'application/json',
   },
-  timeout: 30000, // 30 seconds timeout
+  timeout: API_TIMEOUT_MS,
 });
 
 // Add response interceptor for better error handling
@@ -35,6 +48,9 @@ api.interceptors.response.use(
     return response;
   },
   (error) => {
+    if (error?.code === 'ECONNABORTED' && String(error?.message || '').toLowerCase().includes('timeout')) {
+      error.message = `Request timed out after ${API_TIMEOUT_MS}ms. Check REACT_APP_API_BASE_URL and backend availability.`;
+    }
     console.error('API Error:', error);
     if (error.response) {
       console.error('Error Response:', error.response.data);
