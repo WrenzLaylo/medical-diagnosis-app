@@ -1,17 +1,21 @@
 import axios from 'axios';
 
+const isBrowser = typeof window !== 'undefined';
+const isLocalHost = isBrowser
+  ? window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  : false;
+
 const resolveApiBaseUrl = (): string => {
   if (process.env.REACT_APP_API_BASE_URL) {
     return process.env.REACT_APP_API_BASE_URL.replace(/\/+$/, '');
   }
 
-  if (typeof window !== 'undefined') {
+  if (isBrowser) {
     const { protocol, hostname } = window.location;
-    const isLocalHost = hostname === 'localhost' || hostname === '127.0.0.1';
     if (isLocalHost) {
       return `${protocol}//${hostname}:8000/api`;
     }
-    return '/api';
+    return '';
   }
 
   return 'http://localhost:8000/api';
@@ -28,6 +32,13 @@ const resolveApiTimeoutMs = (): number => {
 const API_BASE_URL = resolveApiBaseUrl();
 const API_TIMEOUT_MS = resolveApiTimeoutMs();
 
+const ensureApiConfigured = (): void => {
+  if (API_BASE_URL) return;
+  throw new Error(
+    'API is not configured. Set REACT_APP_API_BASE_URL in Vercel to your deployed Django backend (e.g. https://your-backend-domain/api).'
+  );
+};
+
 const api = axios.create({
   baseURL: API_BASE_URL,
   headers: {
@@ -37,6 +48,20 @@ const api = axios.create({
 });
 
 // Add response interceptor for better error handling
+api.interceptors.request.use(
+  (config) => {
+    if (!API_BASE_URL && !isLocalHost) {
+      return Promise.reject(
+        new Error(
+          'API is not configured. Set REACT_APP_API_BASE_URL in Vercel to your deployed Django backend (e.g. https://your-backend-domain/api).'
+        )
+      );
+    }
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
+
 api.interceptors.response.use(
   (response) => {
     // Handle paginated responses from DRF
@@ -88,6 +113,7 @@ export const diagnosisAPI = {
       onDone?: (payload: any) => void;
     } = {}
   ) => {
+    ensureApiConfigured();
     const response = await fetch(`${API_BASE_URL}/diagnoses/analyze_stream/`, {
       method: 'POST',
       headers: {
