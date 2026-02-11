@@ -9,7 +9,12 @@ Major Improvements:
 - DIFFERENTIAL RANKING: Proper Bayesian likelihood scoring
 """
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv(*args, **kwargs):
+        return False
+
 load_dotenv()
 
 import os
@@ -39,75 +44,49 @@ class Med42ServiceCloud:
         # Initialize clinical decision rules
         self.red_flag_patterns = self._initialize_red_flags()
         self.symptom_clusters = self._initialize_symptom_clusters()
+        self.medication_protocols = self._initialize_medication_protocols()
         
-        print(f"✓ Med42-v3-{self.model_size} Production Service Ready")
-        print(f"  ✓ Red flag detection enabled")
-        print(f"  ✓ Symptom pattern validation enabled")
-        print(f"  ✓ Clinical decision rules loaded")
+        print(f"[OK] Med42-v3-{self.model_size} Production Service Ready")
+        print("  [OK] Red flag detection enabled")
+        print("  [OK] Symptom pattern validation enabled")
+        print("  [OK] Clinical decision rules loaded")
     
     def _build_enhanced_system_prompt(self) -> str:
-        """Build comprehensive clinical reasoning prompt"""
-        return """You are Med42-v3, an evidence-based clinical AI assistant providing differential diagnosis support.
+        """Build concise, safety-focused clinical reasoning prompt"""
+        return """You are Med42-v3 clinical decision support for licensed clinicians.
 
-CRITICAL SAFETY RULES:
+Core behavior:
+- Prioritize patient safety and life-threatening causes first.
+- Match diagnoses to the full symptom pattern, not isolated keywords.
+- Use evidence hierarchy: objective findings > symptoms > history.
+- Avoid benign labels when red flags are present.
+- Calibrate confidence honestly; uncertainty should lower confidence.
+- Recommend medications only when empiric treatment is reasonably safe.
 
-1. RED FLAG SYMPTOMS - ALWAYS FLAG AS URGENT:
-   - Hemoptysis (coughing blood) → TB, malignancy, PE, vasculitis
-   - Epistaxis (nosebleeds) + other bleeding → bleeding disorder, thrombocytopenia
-   - Chest pain + dyspnea → ACS, PE, pneumothorax
-   - Severe headache + neck stiffness → meningitis, SAH
-   - Altered mental status → stroke, metabolic, infection
-   - Sudden vision loss → retinal detachment, stroke, GCA
-   
-   For red flags: DO NOT diagnose benign conditions. Recommend URGENT evaluation.
+Before writing your answer, silently:
+1) list key positive and negative findings,
+2) generate multiple candidate diagnoses,
+3) rank by likelihood x severity.
 
-2. SYMPTOM PATTERN VALIDATION:
-   - Diagnosis MUST match the COMPLETE symptom pattern, not just keywords
-   - Example: "Angioedema" requires swelling (lips/tongue/face) + possible hives
-   - If hallmark features ABSENT → diagnosis is WRONG, look for alternatives
-   - Validate: Does this diagnosis explain ALL major symptoms?
+Output format (use these exact section headers):
+**PRIMARY DIAGNOSIS**: one diagnosis
+**WHY THIS FITS**
+- concise evidence bullets
+**DIFFERENTIAL DIAGNOSES**
+1. diagnosis | likelihood | key for/against
+**CONFIDENCE**: percent + one-line rationale
+**RECOMMENDED WORKUP**
+1. urgent/high-yield tests first
+**MEDICATION RECOMMENDATIONS**
+- Medication | Dose | Frequency | Duration | Purpose | Safety note
+- If unsafe/uncertain: "No empiric medications until further workup"
+**CLINICAL SUMMARY**
+2-4 lines with urgency and next step
 
-3. CLINICAL DECISION RULES:
-   - Hemoptysis >2 weeks → Pulmonary TB until proven otherwise (esp. in endemic areas)
-   - Bleeding from multiple sites → Hematologic workup (CBC, coag panel)
-   - Chronic cough + constitutional symptoms → TB, malignancy, chronic infection
-   
-4. EVIDENCE HIERARCHY:
-   - Objective findings (labs, imaging) > Symptoms > History
-   - Normal labs CONTRADICT diagnoses requiring abnormal labs
-   - Examples:
-     * Celiac disease needs: positive serology OR villous atrophy on biopsy
-     * Anemia needs: low Hgb/Hct
-     * Malabsorption needs: deficiencies, weight loss, diarrhea
-
-5. CONFIDENCE CALIBRATION:
-   - High (>80%): Pathognomonic features + objective evidence
-   - Moderate (60-80%): Classic presentation, minimal contradictions
-   - Low-Moderate (40-60%): Possible, needs workup
-   - Low (<40%): Rule-out only OR red flags requiring urgent eval
-   
-   RED FLAGS = Always Low-Moderate or Low confidence + URGENT WORKUP needed
-
-6. MEDICATION SAFETY:
-   - Prescribe ONLY after diagnosis is reasonably confirmed
-   - First-line evidence-based treatments only
-   - Include contraindications and monitoring
-   - For red flags: stabilization > specific treatment
-
-7. DIFFERENTIAL DIAGNOSIS RANKING:
-   - Most likely diagnosis FIRST (best fit for symptom pattern)
-   - Rank by: Likelihood × Severity (life-threatening conditions prioritized)
-   - Must-not-miss diagnoses (even if less likely) included in differential
-
-FORMAT YOUR RESPONSE:
-- Start with URGENT ALERT if red flags present, if there is none, don't include any urgent message, start with primary diagnosis
-- Primary diagnosis with complete reasoning
-- Differential ranked by likelihood
-- Confidence with explicit justification
-- Workup prioritizing most critical tests
-- Medications (if appropriate) with safety considerations
-
-Be clinically sound, appropriately cautious, and prioritize patient safety."""
+Constraints:
+- Keep response concise and doctor-readable.
+- Prefer short bullets over long paragraphs.
+- Max ~320 words."""
 
     def _initialize_red_flags(self) -> Dict[str, Dict]:
         """Initialize red flag symptom patterns"""
@@ -282,6 +261,292 @@ Be clinically sound, appropriately cautious, and prioritize patient safety."""
                 'should_not_have': ['hemoptysis', 'chronic_epistaxis', 'systemic_symptoms']
             }
         }
+
+    def _initialize_medication_protocols(self) -> Dict[str, List[Dict[str, str]]]:
+        """Conservative fallback medication plans for common outpatient diagnoses"""
+        return {
+            'pneumonia': [
+                {
+                    'medication_name': 'Amoxicillin-Clavulanate',
+                    'dosage': '875/125 mg',
+                    'frequency': 'PO every 12 hours',
+                    'duration': '5-7 days',
+                    'instructions': 'Typical adult CAP regimen; verify allergies, renal dose, and local resistance.'
+                }
+            ],
+            'asthma': [
+                {
+                    'medication_name': 'Albuterol inhaler',
+                    'dosage': '90 mcg/puff',
+                    'frequency': '1-2 puffs every 4-6 hours PRN',
+                    'duration': 'As needed',
+                    'instructions': 'Rescue therapy; escalate care if persistent dyspnea, hypoxia, or poor response.'
+                }
+            ],
+            'copd': [
+                {
+                    'medication_name': 'Albuterol inhaler',
+                    'dosage': '90 mcg/puff',
+                    'frequency': '1-2 puffs every 4-6 hours PRN',
+                    'duration': 'As needed',
+                    'instructions': 'Symptom relief; assess oxygenation and exacerbation severity.'
+                }
+            ],
+            'gerd': [
+                {
+                    'medication_name': 'Omeprazole',
+                    'dosage': '20 mg',
+                    'frequency': 'PO once daily before breakfast',
+                    'duration': '4-8 weeks',
+                    'instructions': 'Trial for reflux symptoms; reassess alarm features (dysphagia, GI bleeding, weight loss).'
+                }
+            ],
+            'uti': [
+                {
+                    'medication_name': 'Nitrofurantoin monohydrate/macrocrystals',
+                    'dosage': '100 mg',
+                    'frequency': 'PO every 12 hours',
+                    'duration': '5 days',
+                    'instructions': 'For uncomplicated cystitis when clinically appropriate; avoid if concern for pyelonephritis.'
+                }
+            ],
+            'allergic rhinitis': [
+                {
+                    'medication_name': 'Cetirizine',
+                    'dosage': '10 mg',
+                    'frequency': 'PO once daily',
+                    'duration': 'As needed',
+                    'instructions': 'Non-sedating antihistamine for allergic symptoms.'
+                }
+            ]
+        }
+
+    def _normalize_condition_name(self, condition: str) -> str:
+        """Convert internal condition keys to clinician-friendly names"""
+        aliases = {
+            'pulmonary_tb': 'Pulmonary TB',
+            'tuberculosis': 'Pulmonary TB',
+            'acute_coronary_syndrome': 'Acute coronary syndrome',
+            'pulmonary_embolism': 'Pulmonary embolism',
+            'bleeding_disorder': 'Bleeding disorder',
+            'celiac_disease': 'Celiac disease',
+            'celiac': 'Celiac disease',
+            'uti': 'Urinary tract infection',
+            'ibs': 'Irritable bowel syndrome',
+            'gerd': 'Gastroesophageal reflux disease',
+            'copd': 'COPD',
+        }
+        if condition in aliases:
+            return aliases[condition]
+        return condition.replace('_', ' ').strip().title()
+
+    def _canonical_diagnosis(self, diagnosis: str) -> str:
+        """Normalize diagnosis string for duplicate checks"""
+        normalized = diagnosis.lower().strip()
+        normalized = normalized.replace('tuberculosis', 'tb')
+        normalized = normalized.replace('pulmonary tuberculosis', 'pulmonary tb')
+        normalized = re.sub(r'[^a-z0-9\s]', ' ', normalized)
+        normalized = re.sub(r'\s+', ' ', normalized).strip()
+        return normalized
+
+    def _diagnoses_match(self, left: str, right: str) -> bool:
+        """Loose matching for diagnosis equivalence"""
+        l = self._canonical_diagnosis(left)
+        r = self._canonical_diagnosis(right)
+        if not l or not r:
+            return False
+        return l == r or l in r or r in l
+
+    def _feature_present(self, feature: str, text: str) -> bool:
+        """Check whether a clinical feature is present with negation handling"""
+        phrase = feature.replace('_', ' ').lower().strip()
+        checks = [phrase]
+        checks.extend(self._get_symptom_variations(phrase))
+        # Limit variation fan-out to preserve runtime determinism.
+        for term in list(dict.fromkeys(checks))[:10]:
+            if self._is_present_and_not_negated(term, text):
+                return True
+        return False
+
+    def _build_pre_diagnostic_hypotheses(
+        self, symptoms_text: str, clinical_notes: str, red_flag_analysis: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Heuristic pre-ranking before LLM call to improve differential quality"""
+        combined_text = f"{symptoms_text} {clinical_notes}".lower()
+        candidates = []
+
+        for condition, pattern in self.symptom_clusters.items():
+            required = pattern.get('required', [])
+            typical = pattern.get('typical', [])
+            may_have = pattern.get('may_have', [])
+            should_not_have = pattern.get('should_not_have', [])
+
+            required_hits = [f for f in required if self._feature_present(f, combined_text)]
+            typical_hits = [f for f in typical if self._feature_present(f, combined_text)]
+            optional_hits = [f for f in may_have if self._feature_present(f, combined_text)]
+            contradiction_hits = [f for f in should_not_have if self._feature_present(f, combined_text)]
+            missing_required = [f for f in required if f not in required_hits]
+
+            required_ratio = (len(required_hits) / len(required)) if required else 0.5
+            typical_ratio = (len(typical_hits) / len(typical)) if typical else 0.0
+            optional_ratio = (len(optional_hits) / len(may_have)) if may_have else 0.0
+
+            score = (0.55 * required_ratio) + (0.30 * typical_ratio) + (0.15 * optional_ratio)
+            if required and not required_hits:
+                score *= 0.40
+            score -= 0.18 * len(missing_required)
+            score -= 0.12 * len(contradiction_hits)
+            score = max(0.0, min(score, 0.92))
+
+            if score < 0.22 and not required_hits:
+                continue
+
+            candidates.append({
+                'term': self._normalize_condition_name(condition),
+                'score': round(score, 2),
+                'supporting': [s.replace('_', ' ') for s in (required_hits + typical_hits)][:4],
+                'missing': [m.replace('_', ' ') for m in missing_required][:3],
+                'contra': [c.replace('_', ' ') for c in contradiction_hits][:2]
+            })
+
+        candidates.sort(key=lambda x: x['score'], reverse=True)
+        deduped = []
+        seen = set()
+        for candidate in candidates:
+            key = self._canonical_diagnosis(candidate['term'])
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(candidate)
+            if len(deduped) >= 6:
+                break
+
+        must_not_miss = []
+        seen_mnm = set()
+        for flag in red_flag_analysis.get('detected_flags', []):
+            for dx in flag.get('ddx', []):
+                key = self._canonical_diagnosis(dx)
+                if key in seen_mnm:
+                    continue
+                seen_mnm.add(key)
+                must_not_miss.append(dx)
+                if len(must_not_miss) >= 6:
+                    break
+            if len(must_not_miss) >= 6:
+                break
+
+        return {
+            'candidates': deduped,
+            'must_not_miss': must_not_miss,
+        }
+
+    def _build_hypothesis_context(self, hypotheses: Dict[str, Any], features: List[str]) -> str:
+        """Compact heuristic context injected into prompt"""
+        lines = ["PRE-LLM HEURISTIC TRIAGE:"]
+        if features:
+            lines.append(f"- Positive features: {', '.join(features[:10])}")
+
+        if hypotheses.get('candidates'):
+            lines.append("- Top pattern-fit candidates:")
+            for idx, cand in enumerate(hypotheses['candidates'][:4], 1):
+                support = ', '.join(cand['supporting']) if cand['supporting'] else 'limited direct match'
+                missing = f"; missing: {', '.join(cand['missing'])}" if cand['missing'] else ''
+                lines.append(f"  {idx}. {cand['term']} ({int(cand['score'] * 100)}%) - support: {support}{missing}")
+
+        if hypotheses.get('must_not_miss'):
+            lines.append(f"- Must-not-miss due to red flags: {', '.join(hypotheses['must_not_miss'][:4])}")
+
+        return "\n".join(lines)
+
+    def _merge_with_heuristic_differential(
+        self, diagnoses: List[Dict[str, Any]], hypotheses: Dict[str, Any], red_flag_analysis: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Blend LLM differential with deterministic pattern-fit candidates"""
+        merged = list(diagnoses)
+
+        if not merged:
+            for cand in hypotheses.get('candidates', [])[:4]:
+                merged.append({'term': cand['term'], 'score': max(0.35, min(cand['score'], 0.82))})
+
+        for cand in hypotheses.get('candidates', [])[:4]:
+            if any(self._diagnoses_match(cand['term'], d['term']) for d in merged):
+                continue
+            merged.append({'term': cand['term'], 'score': max(0.35, min(cand['score'] * 0.9, 0.70))})
+
+        if red_flag_analysis.get('has_red_flags'):
+            for high_risk in hypotheses.get('must_not_miss', [])[:3]:
+                if any(self._diagnoses_match(high_risk, d['term']) for d in merged):
+                    continue
+                merged.append({'term': high_risk, 'score': 0.34})
+
+        merged.sort(key=lambda x: x.get('score', 0.0), reverse=True)
+
+        deduped = []
+        seen = set()
+        for item in merged:
+            key = self._canonical_diagnosis(item.get('term', ''))
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+            if len(deduped) >= 6:
+                break
+
+        return deduped
+
+    def _line_to_heading_key(self, line: str) -> str:
+        """Normalize a line to a known section heading key when possible"""
+        normalized = line.strip().lower()
+        normalized = re.sub(r'^\d+\.\s*', '', normalized)
+        normalized = normalized.replace('#', '').replace('*', '')
+        normalized = normalized.strip(': ').strip()
+        normalized = re.sub(r'\s+', ' ', normalized)
+
+        heading_map = {
+            'urgent alert': 'urgent',
+            'primary diagnosis': 'primary',
+            'why this fits': 'why',
+            'differential diagnoses': 'differential',
+            'differential diagnosis': 'differential',
+            'differential': 'differential',
+            'confidence': 'confidence',
+            'recommended workup': 'workup',
+            'workup': 'workup',
+            'medication recommendations': 'medications',
+            'medications': 'medications',
+            'clinical summary': 'summary',
+            'summary': 'summary',
+        }
+
+        for heading, key in heading_map.items():
+            if normalized.startswith(heading):
+                return key
+        return ''
+
+    def _extract_section(self, response: str, target_keys: List[str]) -> str:
+        """Extract a section body based on normalized heading keys"""
+        lines = response.splitlines()
+        capturing = False
+        collected = []
+
+        for raw_line in lines:
+            key = self._line_to_heading_key(raw_line)
+            if key:
+                if capturing:
+                    break
+                if key in target_keys:
+                    capturing = True
+                    inline_match = re.search(r':\s*(.+)$', raw_line.strip())
+                    if inline_match:
+                        inline_text = inline_match.group(1).strip()
+                        if inline_text and inline_text != raw_line.strip():
+                            collected.append(inline_text)
+                continue
+
+            if capturing:
+                collected.append(raw_line)
+
+        return '\n'.join(collected).strip()
     
     def _is_present_and_not_negated(self, keyword: str, text: str) -> bool:
         """Check if keyword exists and is NOT negated (e.g. 'denies chest pain')"""
@@ -543,7 +808,7 @@ Be clinically sound, appropriately cautious, and prioritize patient safety."""
             
             return completion.choices[0].message.content.strip()
         except Exception as e:
-            print(f"✗ API Error: {e}")
+            print(f"[ERROR] API Error: {e}")
             return f"Error calling API: {str(e)}"
     
     def analyze_symptoms(self, symptoms_text: str, clinical_notes: str = "") -> Dict[str, Any]:
@@ -551,15 +816,17 @@ Be clinically sound, appropriately cautious, and prioritize patient safety."""
         try:
             # Step 1: Red flag detection
             red_flag_analysis = self.detect_red_flags(symptoms_text, clinical_notes)
+            keywords = self._extract_clinical_features(symptoms_text, clinical_notes)
+            hypotheses = self._build_pre_diagnostic_hypotheses(symptoms_text, clinical_notes, red_flag_analysis)
             
-            print(f"🔍 Analyzing with Med42-v3 (Red Flag Detection + Pattern Validation)...")
+            print("Analyzing with Med42-v3 (Red Flag Detection + Pattern Validation)...")
             
             if red_flag_analysis['has_red_flags']:
-                print(f"⚠️  RED FLAGS DETECTED: {red_flag_analysis['urgency_level']}")
+                print(f"[WARNING] RED FLAGS DETECTED: {red_flag_analysis['urgency_level']}")
                 for flag in red_flag_analysis['detected_flags']:
                     print(f"   - {flag['flag']}: {flag['keyword']}")
             
-            # Step 2: Build enhanced prompt with red flag context
+            # Step 2: Build compact prompt context
             full_text = f"Patient presents with: {symptoms_text}"
             if clinical_notes:
                 full_text += f"\n\nClinical observations: {clinical_notes}"
@@ -568,38 +835,58 @@ Be clinically sound, appropriately cautious, and prioritize patient safety."""
             if red_flag_analysis['has_red_flags']:
                 red_flag_context = self._build_red_flag_context(red_flag_analysis)
                 full_text += f"\n\n{red_flag_context}"
+
+            # Add deterministic pre-LLM pattern-fit context
+            hypothesis_context = self._build_hypothesis_context(hypotheses, keywords)
+            full_text += f"\n\n{hypothesis_context}"
             
             # Step 3: Get LLM analysis
-            analysis = self._get_comprehensive_analysis(full_text, red_flag_analysis)
+            analysis = self._get_comprehensive_analysis(full_text, red_flag_analysis, hypotheses)
             
-            if analysis.startswith("Error:"):
+            if analysis.lower().startswith("error"):
                 return self._build_error_response(analysis)
             
             # Step 4: Parse and validate response
             parsed = self._parse_comprehensive_response(analysis)
+            parsed['diagnoses'] = self._merge_with_heuristic_differential(
+                parsed.get('diagnoses', []), hypotheses, red_flag_analysis
+            )
             
             # Step 5: Validate primary diagnosis against symptom patterns
             if parsed['diagnoses']:
                 primary_dx = parsed['diagnoses'][0]['term']
-                is_valid, validation_msg = self.validate_diagnosis_pattern(primary_dx, symptoms_text)
+                combined_input = f"{symptoms_text} {clinical_notes}".strip()
+                is_valid, validation_msg = self.validate_diagnosis_pattern(primary_dx, combined_input)
                 
                 if not is_valid:
-                    print(f"⚠️  VALIDATION WARNING: {validation_msg}")
+                    print(f"[WARNING] VALIDATION WARNING: {validation_msg}")
                     parsed['validation_warning'] = validation_msg
                     # Reduce confidence if pattern doesn't match
                     parsed['confidence_score'] = min(parsed['confidence_score'], 0.40)
                     parsed['interpretation'] = f"Low confidence - {validation_msg}"
             
-            # Step 6: Extract clinical features
-            keywords = self._extract_clinical_features(symptoms_text, clinical_notes)
+            # Step 6: Normalize medications and apply fallback if safe
+            parsed['medications'] = self._normalize_medications(parsed.get('medications', []))
+            if not parsed['medications'] and parsed['diagnoses']:
+                fallback_meds = self._build_fallback_medications(
+                    parsed['diagnoses'][0]['term'],
+                    red_flag_analysis
+                )
+                if fallback_meds:
+                    parsed['medications'] = fallback_meds
+
+            # Step 7: Build concise doctor-facing report
+            doctor_report = self._build_doctor_facing_reasoning(parsed, red_flag_analysis, hypotheses)
             
-            # Step 7: Build final results
+            # Step 8: Build final results
             results = {
                 'confidence_score': parsed['confidence_score'],
                 'suggested_diagnoses': parsed['diagnoses'],
                 'keywords': keywords,
                 'interpretation': parsed['interpretation'],
-                'clinical_reasoning': analysis,
+                'clinical_reasoning': doctor_report,
+                'raw_clinical_reasoning': analysis,
+                'summary': parsed.get('summary', ''),
                 'recommendations': parsed['recommendations'],
                 'medications': parsed['medications'],
                 'red_flag_analysis': red_flag_analysis,
@@ -607,7 +894,7 @@ Be clinically sound, appropriately cautious, and prioritize patient safety."""
             }
             
             # Print summary
-            print(f"✓ Analysis complete")
+            print("Analysis complete")
             if parsed['diagnoses']:
                 print(f"  Primary Dx: {parsed['diagnoses'][0]['term']}")
                 print(f"  Confidence: {parsed['confidence_score']:.1%}")
@@ -618,263 +905,390 @@ Be clinically sound, appropriately cautious, and prioritize patient safety."""
             return results
             
         except Exception as e:
-            print(f"✗ Error: {e}")
+            print(f"[ERROR] {e}")
             import traceback
             traceback.print_exc()
             return self._build_error_response(str(e))
     
     def _build_red_flag_context(self, red_flag_analysis: Dict) -> str:
         """Build context for LLM about detected red flags"""
-        context = "⚠️ URGENT RED FLAGS DETECTED:\n"
-        
-        for flag in red_flag_analysis['detected_flags']:
-            context += f"\n{flag['flag'].upper().replace('_', ' ')}:\n"
-            context += f"  Severity: {flag['severity']}\n"
-            context += f"  Must consider: {', '.join(flag['ddx'][:3])}\n"
-            context += f"  Priority workup: {', '.join(flag['workup'][:3])}\n"
-        
-        context += "\nDO NOT diagnose benign conditions when red flags present. Focus on serious causes first."
-        
-        return context
+        lines = ["RED FLAG CONTEXT:"]
+        for flag in red_flag_analysis.get('detected_flags', []):
+            lines.append(
+                f"- {flag['flag'].replace('_', ' ')} ({flag['severity']}): "
+                f"consider {', '.join(flag.get('ddx', [])[:3])}; "
+                f"priority tests: {', '.join(flag.get('workup', [])[:3])}"
+            )
+        lines.append("Avoid benign diagnoses until serious etiologies are excluded.")
+        return "\n".join(lines)
     
-    def _get_comprehensive_analysis(self, clinical_presentation: str, red_flag_analysis: Dict) -> str:
-        """Get comprehensive analysis with red flag awareness and token management"""
-        
-        # Token budget management (8B model typically handles ~4K context well)
-        MAX_CLINICAL_TEXT_CHARS = 2000  # ~500 tokens
-        MAX_PROMPT_CHARS = 6000  # ~1500 tokens total
-        
-        # Trim clinical presentation if too long
-        if len(clinical_presentation) > MAX_CLINICAL_TEXT_CHARS:
-            # Keep most recent/important information
-            clinical_presentation = clinical_presentation[:MAX_CLINICAL_TEXT_CHARS] + "\n[... clinical notes truncated for brevity ...]"
-        
+    def _get_comprehensive_analysis(
+        self, clinical_presentation: str, red_flag_analysis: Dict[str, Any], hypotheses: Dict[str, Any]
+    ) -> str:
+        """Get concise, doctor-readable analysis with token-aware prompt sizing"""
+
+        max_case_chars = 2400
+        max_prompt_chars = 4600
+
+        if len(clinical_presentation) > max_case_chars:
+            clinical_presentation = clinical_presentation[:max_case_chars] + "\n[... truncated for token budget ...]"
+
         urgency_instruction = ""
-        if red_flag_analysis['has_red_flags']:
-            # Concise red flag context
-            flag_names = [f['flag'] for f in red_flag_analysis['detected_flags']]
-            urgency_instruction = f"""
-⚠️ RED FLAGS DETECTED: {', '.join(flag_names[:3])}
-CRITICAL: Address life-threatening causes FIRST. Focus on serious diagnoses (TB, malignancy, PE, bleeding disorders). 
-Confidence must be LOW-MODERATE. Recommend URGENT workup.
-"""
-        
-        # Streamlined prompt for token efficiency
-        user_prompt = f"""CLINICAL CASE:
+        if red_flag_analysis.get('has_red_flags'):
+            flag_names = [f['flag'].replace('_', ' ') for f in red_flag_analysis.get('detected_flags', [])]
+            urgency_instruction = (
+                f"URGENT RED FLAGS: {', '.join(flag_names[:3])}. "
+                "Prioritize life-threatening causes and urgent workup."
+            )
+
+        must_not_miss = hypotheses.get('must_not_miss', [])
+        risk_instruction = ""
+        if must_not_miss:
+            risk_instruction = f"Must-not-miss conditions to address: {', '.join(must_not_miss[:4])}."
+
+        user_prompt = f"""CLINICAL CASE
 {clinical_presentation}
 
+SAFETY FOCUS
 {urgency_instruction}
+{risk_instruction}
 
-PROVIDE ANALYSIS:
+TASK
+Use the required response format exactly.
+Explicitly show:
+- why the primary diagnosis fits,
+- what competing diagnoses remain possible,
+- why confidence is calibrated at that level,
+- medication safety boundaries.
 
-1. **PRIMARY DIAGNOSIS**: Most likely diagnosis explaining ALL major symptoms
-   - Clinical reasoning
-   - Features PRESENT vs ABSENT
-   - Pattern fit validation
+Keep output concise, clinically actionable, and doctor-readable."""
 
-2. **DIFFERENTIAL**: 2-4 alternatives ranked by likelihood × severity
+        if len(user_prompt) > max_prompt_chars:
+            user_prompt = user_prompt[:max_prompt_chars] + "\n[Prompt trimmed to fit token budget]"
 
-3. **CONFIDENCE**: High/Moderate-High/Moderate/Low-Moderate/Low
-   - Justification (red flags = max Low-Moderate)
-
-4. **WORKUP**: 4-6 tests prioritized by urgency
-
-5. **MEDICATIONS**: Only if safe to treat empirically
-   - Format: "Med | Dose | Frequency | Duration | Purpose"
-   - Red flags → supportive care only
-
-6. **SUMMARY**: Clinical picture, urgency, next steps
-
-Be decisive, appropriately cautious, prioritize safety."""
-
-        # Check total prompt length
-        if len(user_prompt) > MAX_PROMPT_CHARS:
-            # Further reduce if needed
-            user_prompt = user_prompt[:MAX_PROMPT_CHARS] + "\n[Prompt optimized for token limits]"
-        
-        return self._call_llm(user_prompt, max_tokens=1500)
+        return self._call_llm(user_prompt, max_tokens=900)
     
     def _parse_comprehensive_response(self, response: str) -> Dict[str, Any]:
-        """Parse Med42 response with enhanced validation"""
-        
+        """Parse Med42 response with section-aware extraction and safer defaults"""
+
         diagnoses = []
-        medications = []
-        recommendations = []
         confidence_score = 0.50
         interpretation = "Moderate confidence"
-        
-        # Extract PRIMARY DIAGNOSIS
-        primary_patterns = [
-            r'\*\*PRIMARY DIAGNOSIS\*\*[:\s]*(?:\*\*)?([^*\n]+?)(?:\*\*)?(?:\n|$)',
-            r'(?:primary diagnosis|most likely)[:\s]*(?:\*\*)?([^*\n]+?)(?:\*\*)?(?:\n|$)',
-        ]
-        
-        for pattern in primary_patterns:
-            match = re.search(pattern, response, re.IGNORECASE)
-            if match:
-                primary = match.group(1).strip()
-                primary = re.sub(r'^[-•*\d]+[.\)]\s*', '', primary)
-                primary = re.sub(r'\s+', ' ', primary).strip()
-                if primary and len(primary) > 3 and not primary.startswith('('):
-                    diagnoses.append({'term': primary, 'score': 0.85})
+
+        # PRIMARY DIAGNOSIS
+        primary_text = self._extract_section(response, ['primary'])
+        if primary_text:
+            for line in primary_text.splitlines():
+                candidate = re.sub(r'^[-•*\d]+[.\)]?\s*', '', line.strip())
+                candidate = re.sub(r'\s+', ' ', candidate).strip(' -')
+                if candidate and len(candidate) > 3:
+                    diagnoses.append({'term': candidate, 'score': 0.85})
                     break
-        
-        # Extract DIFFERENTIAL diagnoses
-        diff_section = re.search(
-            r'\*\*DIFFERENTIAL DIAGNOSES\*\*[^\n]*\n((?:[^\n]+\n?)+?)(?:\n\n|\d+\.\s+\*\*|$)',
-            response,
-            re.IGNORECASE | re.DOTALL
-        )
-        
-        if diff_section:
-            diff_text = diff_section.group(1)
-            diff_items = re.findall(r'(?:^|\n)\s*[-•*]?\s*\d*[.\)]?\s*([A-Z][^\n:]+?)(?:\:|$)', diff_text, re.MULTILINE)
-            
-            for i, item in enumerate(diff_items[:4]):
-                item = re.sub(r'\s+', ' ', item).strip()
-                if item and len(item) > 3 and item not in [d['term'] for d in diagnoses]:
-                    score = max(0.70 - (i * 0.10), 0.35)
-                    diagnoses.append({'term': item, 'score': score})
-        
-        # Extract CONFIDENCE
-        confidence_map = {
-            'high confidence': 0.85,
-            'high': 0.80,
-            'moderate-high confidence': 0.72,
-            'moderate-high': 0.68,
-            'moderate confidence': 0.58,
-            'moderate': 0.55,
-            'low-moderate confidence': 0.45,
-            'low-moderate': 0.42,
-            'low confidence': 0.32,
-            'low': 0.30,
-        }
-        
+
+        if not diagnoses:
+            primary_patterns = [
+                r'(?:primary diagnosis|most likely diagnosis|primary impression)[:\s]*(?:\*\*)?([^*\n]+?)(?:\*\*)?(?:\n|$)',
+            ]
+            for pattern in primary_patterns:
+                match = re.search(pattern, response, re.IGNORECASE)
+                if match:
+                    primary = re.sub(r'^[-•*\d]+[.\)]?\s*', '', match.group(1).strip())
+                    primary = re.sub(r'\s+', ' ', primary).strip(' -')
+                    if primary and len(primary) > 3:
+                        diagnoses.append({'term': primary, 'score': 0.85})
+                        break
+
+        # DIFFERENTIAL
+        diff_text = self._extract_section(response, ['differential'])
+        if diff_text:
+            lines = [ln.strip() for ln in diff_text.splitlines() if ln.strip()]
+            diff_terms = []
+            for line in lines:
+                clean = re.sub(r'^[-•*]\s*', '', line)
+                clean = re.sub(r'^\d+[.)]\s*', '', clean)
+                clean = clean.strip()
+                if not clean:
+                    continue
+                term = clean.split('|')[0].strip()
+                term = term.split(':')[0].strip()
+                term = re.sub(r'\s+', ' ', term).strip(' -')
+                if len(term) > 3:
+                    diff_terms.append(term)
+
+            for i, term in enumerate(diff_terms[:5]):
+                if any(self._diagnoses_match(term, d['term']) for d in diagnoses):
+                    continue
+                score = max(0.70 - (i * 0.10), 0.32)
+                diagnoses.append({'term': term, 'score': score})
+
+        # CONFIDENCE
+        confidence_text = self._extract_section(response, ['confidence'])
+        confidence_source = confidence_text if confidence_text else response
+
+        pct_match = re.search(r'(\d{1,3})\s*%', confidence_source)
+        if pct_match:
+            pct = min(max(int(pct_match.group(1)), 0), 95)
+            confidence_score = pct / 100.0
+        else:
+            confidence_map = [
+                ('moderate-high confidence', 0.72),
+                ('low-moderate confidence', 0.45),
+                ('high confidence', 0.85),
+                ('moderate confidence', 0.58),
+                ('low confidence', 0.32),
+                ('moderate-high', 0.68),
+                ('low-moderate', 0.42),
+                ('moderate', 0.55),
+                ('high', 0.80),
+                ('low', 0.30),
+            ]
+            lower_source = confidence_source.lower()
+            for indicator, score in confidence_map:
+                if re.search(r'\b' + re.escape(indicator) + r'\b', lower_source):
+                    confidence_score = score
+                    break
+
+        interpretation = self._interpret_confidence(confidence_score)
+
+        # Safety-based confidence penalties
         response_lower = response.lower()
-        for indicator, score in confidence_map.items():
-            if f' {indicator}' in response_lower or response_lower.startswith(indicator):
-                confidence_score = score
-                interpretation = self._interpret_confidence(score)
-                break
-        
-        # Red flag penalty
         if any(flag in response_lower for flag in ['red flag', 'urgent', 'life-threatening', 'emergency']):
             confidence_score = min(confidence_score, 0.45)
-            if 'urgent' in interpretation.lower():
-                pass  # Keep existing
-            else:
-                interpretation = "Low-moderate confidence - Urgent evaluation required"
-        
-        # Pattern mismatch penalty
+            interpretation = "Low-moderate confidence - Urgent evaluation required"
+
         if 'pattern' in response_lower and ('not match' in response_lower or 'mismatch' in response_lower):
             confidence_score = min(confidence_score, 0.40)
-        
-        # Extract MEDICATIONS
+            interpretation = self._interpret_confidence(confidence_score)
+
         medications = self._extract_medications(response)
-        
-        # Extract RECOMMENDATIONS
         recommendations = self._extract_recommendations(response)
-        
+        summary = self._extract_section(response, ['summary'])
+
         return {
             'diagnoses': diagnoses[:6],
             'confidence_score': confidence_score,
             'interpretation': interpretation,
             'recommendations': recommendations,
-            'medications': medications
+            'medications': medications,
+            'summary': summary,
         }
     
     def _extract_medications(self, response: str) -> List[Dict]:
-        """Extract medication recommendations with improved parsing for complex names"""
+        """Extract medication recommendations and map to model serializer fields"""
         medications = []
-        
-        med_section = re.search(
-            r'\*\*MEDICATION RECOMMENDATIONS\*\*[:\s]*((?:[^\n]+\n?)+?)(?:\n\n|\d+\.\s+\*\*|$)',
-            response,
-            re.IGNORECASE | re.DOTALL
-        )
-        
-        if not med_section:
+        med_text = self._extract_section(response, ['medications'])
+        if not med_text:
             return medications
-        
-        med_text = med_section.group(1)
-        
-        # Parse structured format: "Med | Dose | Freq | Duration | Purpose | Monitoring"
+
         lines = [line.strip() for line in med_text.split('\n') if line.strip()]
-        
-        for line in lines[:6]:
-            if '|' in line:
-                # Structured format with pipe delimiters
-                parts = [p.strip() for p in line.split('|')]
-                if len(parts) >= 4:
-                    med = {
-                        'medication_name': re.sub(r'^[-•*\d]+[.\)]\s*', '', parts[0]),
-                        'dosage': parts[1],
-                        'frequency': parts[2],
-                        'duration': parts[3],
-                        'purpose': parts[4] if len(parts) > 4 else '',
-                        'monitoring': parts[5] if len(parts) > 5 else ''
-                    }
-                    medications.append(med)
-            else:
-                # Try unstructured parsing with improved regex for complex names
-                # Pattern handles:
-                # - Multi-word names: "Acetaminophen Extended Release"
-                # - Compound names: "Amoxicillin-Clavulanate"
-                # - Generic with brand: "Ibuprofen (Advil)"
-                med_pattern = r'(?:^|\n)\s*[-•*\d]*[.\)]?\s*([A-Z][a-zA-Z]+(?:[\s\-][A-Z]?[a-zA-Z]+)*(?:\s*\([A-Za-z]+\))?)\s+(\d+(?:\.\d+)?\s*(?:mg|ml|mcg|units?|tablets?|capsules?))\s+([^\n,]+?)(?:\s+for\s+([^\n,]+))?(?:\n|$)'
-                
-                matches = re.finditer(med_pattern, line, re.IGNORECASE)
-                
-                for match in matches:
-                    med_name = match.group(1).strip()
-                    
-                    # Clean up medication name
-                    # Remove bullet points, numbers at start
-                    med_name = re.sub(r'^[-•*\d]+[.\)]\s*', '', med_name)
-                    
-                    # Skip if name is too short (likely not a medication)
-                    if len(med_name) < 3:
-                        continue
-                    
-                    # Skip common false positives
-                    if med_name.lower() in ['the', 'and', 'for', 'with', 'patient']:
-                        continue
-                    
-                    med = {
-                        'medication_name': med_name,
-                        'dosage': match.group(2).strip(),
-                        'frequency': match.group(3).strip(),
-                        'duration': match.group(4).strip() if match.group(4) else '7-14 days',
-                        'purpose': '',
-                        'monitoring': ''
-                    }
-                    
-                    # Avoid duplicates
-                    if not any(m['medication_name'] == med['medication_name'] for m in medications):
-                        medications.append(med)
-        
+        for line in lines[:8]:
+            lower_line = line.lower()
+            if 'no empiric medication' in lower_line or 'no empiric medications' in lower_line:
+                return []
+
+            clean = re.sub(r'^[-•*\d]+[.\)]?\s*', '', line).strip()
+            if not clean:
+                continue
+
+            if '|' in clean:
+                parts = [p.strip() for p in clean.split('|')]
+                if len(parts) < 4:
+                    continue
+                instruction_parts = []
+                if len(parts) > 4 and parts[4]:
+                    instruction_parts.append(f"Purpose: {parts[4]}")
+                if len(parts) > 5 and parts[5]:
+                    instruction_parts.append(f"Safety: {parts[5]}")
+
+                medications.append({
+                    'medication_name': parts[0],
+                    'dosage': parts[1],
+                    'frequency': parts[2],
+                    'duration': parts[3],
+                    'instructions': '; '.join(instruction_parts),
+                })
+                continue
+
+            # Unstructured fallback: "<Medication> <dose> <frequency> ..."
+            med_pattern = (
+                r'([A-Z][a-zA-Z]+(?:[\s\-][A-Z]?[a-zA-Z]+)*(?:\s*\([A-Za-z]+\))?)\s+'
+                r'(\d+(?:\.\d+)?\s*(?:mg|ml|mcg|g|units?|tablets?|capsules?|puffs?))\s+'
+                r'([^\n,;]+)'
+            )
+            match = re.search(med_pattern, clean)
+            if not match:
+                continue
+
+            medications.append({
+                'medication_name': match.group(1).strip(),
+                'dosage': match.group(2).strip(),
+                'frequency': match.group(3).strip(),
+                'duration': 'As clinically indicated',
+                'instructions': '',
+            })
+
         return medications
     
     def _extract_recommendations(self, response: str) -> List[str]:
         """Extract diagnostic workup recommendations"""
+        rec_text = self._extract_section(response, ['workup'])
+        if not rec_text:
+            return []
+
+        recs = re.findall(r'[-•*\d]+[.\)]\s*([^\n]+)', rec_text)
+        if not recs:
+            recs = [line.strip() for line in rec_text.split('\n') if line.strip()]
+
         recommendations = []
-        
-        rec_section = re.search(
-            r'\*\*RECOMMENDED WORKUP\*\*[:\s]*((?:[^\n]+\n?)+?)(?:\n\n|\d+\.\s+\*\*|$)',
-            response,
-            re.IGNORECASE | re.DOTALL
-        )
-        
-        if rec_section:
-            rec_text = rec_section.group(1).strip()
-            recs = re.findall(r'[-•*\d]+[.\)]\s*([^\n]+)', rec_text)
-            
-            if not recs:
-                recs = [line.strip() for line in rec_text.split('\n') if line.strip()]
-            
-            recommendations = [r.strip() for r in recs if len(r.strip()) > 10][:6]
-        
+        for rec in recs:
+            cleaned = re.sub(r'\s+', ' ', rec).strip(' -')
+            if len(cleaned) < 8:
+                continue
+            recommendations.append(cleaned)
+            if len(recommendations) >= 6:
+                break
         return recommendations
+
+    def _normalize_medications(self, medications: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        """Normalize medication payload to backend serializer-compatible fields"""
+        normalized = []
+        seen = set()
+
+        for med in medications:
+            name = str(med.get('medication_name', '')).strip()
+            if not name:
+                continue
+            if 'no empiric medication' in name.lower():
+                continue
+
+            key = re.sub(r'[^a-z0-9]+', '', name.lower())
+            if not key or key in seen:
+                continue
+            seen.add(key)
+
+            dosage = str(med.get('dosage', '')).strip() or 'Per guideline'
+            frequency = str(med.get('frequency', '')).strip() or 'Per guideline'
+            duration = str(med.get('duration', '')).strip() or 'Per clinical course'
+
+            instructions = str(med.get('instructions', '')).strip()
+            purpose = str(med.get('purpose', '')).strip()
+            monitoring = str(med.get('monitoring', '')).strip()
+            instruction_parts = []
+            if instructions:
+                instruction_parts.append(instructions)
+            if purpose:
+                instruction_parts.append(f"Purpose: {purpose}")
+            if monitoring:
+                instruction_parts.append(f"Safety: {monitoring}")
+
+            normalized.append({
+                'medication_name': name,
+                'dosage': dosage,
+                'frequency': frequency,
+                'duration': duration,
+                'instructions': '; '.join(instruction_parts),
+            })
+
+            if len(normalized) >= 5:
+                break
+
+        return normalized
+
+    def _build_fallback_medications(
+        self, primary_diagnosis: str, red_flag_analysis: Dict[str, Any]
+    ) -> List[Dict[str, str]]:
+        """Return conservative fallback medications only when red-flag risk is low"""
+        if red_flag_analysis.get('has_red_flags'):
+            return []
+
+        diagnosis_lower = primary_diagnosis.lower()
+        alias_map = {
+            'urinary tract infection': 'uti',
+            'gastroesophageal reflux disease': 'gerd',
+            'allergic rhinitis': 'allergic rhinitis',
+            'community acquired pneumonia': 'pneumonia',
+        }
+
+        protocol_key = ''
+        for key in self.medication_protocols.keys():
+            if key in diagnosis_lower:
+                protocol_key = key
+                break
+
+        if not protocol_key:
+            for alias, mapped_key in alias_map.items():
+                if alias in diagnosis_lower:
+                    protocol_key = mapped_key
+                    break
+
+        if not protocol_key:
+            return []
+
+        return [dict(item) for item in self.medication_protocols.get(protocol_key, [])]
+
+    def _build_doctor_facing_reasoning(
+        self, parsed: Dict[str, Any], red_flag_analysis: Dict[str, Any], hypotheses: Dict[str, Any]
+    ) -> str:
+        """Build consistent, concise, clinician-readable reasoning text"""
+        lines = []
+
+        if red_flag_analysis.get('has_red_flags'):
+            flags = [f['flag'].replace('_', ' ') for f in red_flag_analysis.get('detected_flags', [])]
+            lines.append(
+                f"**URGENT ALERT**: {red_flag_analysis.get('urgency_level', 'HIGH')} priority red flags detected"
+                f" ({', '.join(flags[:3])})."
+            )
+
+        if parsed.get('diagnoses'):
+            lines.append(f"**PRIMARY DIAGNOSIS**: {parsed['diagnoses'][0]['term']}")
+        else:
+            lines.append("**PRIMARY DIAGNOSIS**: Undifferentiated syndrome - further workup required")
+
+        lines.append("**DIFFERENTIAL DIAGNOSES**")
+        if parsed.get('diagnoses'):
+            for idx, diag in enumerate(parsed['diagnoses'][:5], 1):
+                score_pct = int(max(0.0, min(diag.get('score', 0.0), 0.99)) * 100)
+                lines.append(f"{idx}. {diag['term']} ({score_pct}%)")
+        else:
+            for idx, cand in enumerate(hypotheses.get('candidates', [])[:4], 1):
+                lines.append(f"{idx}. {cand['term']} ({int(cand['score'] * 100)}%)")
+
+        confidence_pct = int(max(0.0, min(parsed.get('confidence_score', 0.0), 0.99)) * 100)
+        lines.append(f"**CONFIDENCE**: {confidence_pct}% - {parsed.get('interpretation', 'Clinical correlation required')}")
+
+        if parsed.get('recommendations'):
+            lines.append("**RECOMMENDED WORKUP**")
+            for rec in parsed['recommendations'][:6]:
+                lines.append(f"- {rec}")
+
+        lines.append("**MEDICATION RECOMMENDATIONS**")
+        if parsed.get('medications'):
+            for med in parsed['medications'][:5]:
+                instruction = med.get('instructions', '')
+                if instruction:
+                    lines.append(
+                        f"- {med['medication_name']} | {med['dosage']} | {med['frequency']} | {med['duration']} | {instruction}"
+                    )
+                else:
+                    lines.append(
+                        f"- {med['medication_name']} | {med['dosage']} | {med['frequency']} | {med['duration']}"
+                    )
+        else:
+            lines.append("- No empiric medications until further workup if diagnosis remains uncertain.")
+
+        summary = parsed.get('summary', '').strip()
+        if not summary:
+            if red_flag_analysis.get('has_red_flags'):
+                summary = "Urgent evaluation is required to rule out life-threatening etiologies."
+            elif parsed.get('diagnoses'):
+                summary = f"Most likely diagnosis is {parsed['diagnoses'][0]['term']}; complete recommended workup before definitive treatment."
+            else:
+                summary = "Diagnosis remains broad; prioritize targeted labs/imaging and re-assess."
+
+        lines.append("**CLINICAL SUMMARY**")
+        lines.append(summary)
+
+        return '\n'.join(lines)
     
     def _extract_clinical_features(self, symptoms_text: str, clinical_notes: str) -> List[str]:
         """Extract positive clinical features (exclude negations) with improved matching"""
@@ -985,6 +1399,8 @@ Be decisive, appropriately cautious, prioritize safety."""
             'keywords': [],
             'interpretation': 'Analysis failed',
             'clinical_reasoning': error_msg,
+            'raw_clinical_reasoning': error_msg,
+            'summary': '',
             'recommendations': [],
             'medications': [],
             'red_flag_analysis': {'has_red_flags': False, 'urgency_level': 'UNKNOWN', 'detected_flags': []}
@@ -993,20 +1409,20 @@ Be decisive, appropriately cautious, prioritize safety."""
 
 # Initialize service
 print("=" * 70)
-print("🤖 Med42-v3 Production Clinical Service")
+print("Med42-v3 Production Clinical Service")
 print("=" * 70)
 print("Safety Features:")
-print("  ✓ Red flag detection (hemoptysis, chest pain, altered MS, etc.)")
-print("  ✓ Symptom pattern validation (prevents keyword-only errors)")
-print("  ✓ Clinical decision rules (TB, bleeding disorders, etc.)")
-print("  ✓ Medication safety checks")
-print("  ✓ Confidence calibration with pattern validation")
+print("  [OK] Red flag detection (hemoptysis, chest pain, altered MS, etc.)")
+print("  [OK] Symptom pattern validation (prevents keyword-only errors)")
+print("  [OK] Clinical decision rules (TB, bleeding disorders, etc.)")
+print("  [OK] Medication safety checks")
+print("  [OK] Confidence calibration with pattern validation")
 print("=" * 70)
 
 try:
     med42_service = Med42ServiceCloud(model_size="8B")
-    print("✅ Service ready")
+    print("Service ready")
 except ValueError as e:
-    print(f"❌ Failed: {e}")
+    print(f"Failed: {e}")
     print("Set HF_TOKEN environment variable")
     med42_service = None

@@ -162,11 +162,11 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['patch'])
     def update_diagnosis(self, request, pk=None):
-        """Update diagnosis text and clinical notes"""
+        """Update diagnosis details including medications"""
         diagnosis = self.get_object()
         
         # Only allow updating these fields
-        allowed_fields = ['diagnosis_text', 'clinical_notes']
+        allowed_fields = ['diagnosis_text', 'clinical_notes', 'medications']
         update_data = {k: v for k, v in request.data.items() if k in allowed_fields}
         
         serializer = self.get_serializer(diagnosis, data=update_data, partial=True)

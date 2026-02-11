@@ -56,8 +56,8 @@ function App() {
 
           <div className="flex items-center gap-3">
             <div className="text-right hidden sm:block">
-              <p className="text-xs font-semibold text-slate-700">Dr. Smith</p>
-              <p className="text-[10px] text-slate-500">Cardiology</p>
+              <p className="text-xs font-semibold text-slate-700">Dr. Laylo</p>
+              <p className="text-[10px] text-slate-500">Physician</p>
             </div>
             <div className="w-8 h-8 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center text-xs font-bold text-slate-600">
               DS

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { diagnosisAPI } from '../services/api';
 import DiagnosisDetail from './DiagnosisDetail';
-import { safeNumber, formatPercentage } from '../utils/formatUtils';
+import { formatPercentage } from '../utils/formatUtils';
 
 interface DiagnosisListProps {
   refreshKey: number;
@@ -41,7 +41,11 @@ const DiagnosisList: React.FC<DiagnosisListProps> = ({ refreshKey }) => {
       const diagnosesData = Array.isArray(response.data) ? response.data : [];
       setDiagnoses(diagnosesData);
     } catch (error: any) {
-      setError(error.response?.data?.error || error.message || 'Failed to load diagnoses');
+      if (!error.response && error.message === 'Network Error') {
+        setError('Network Error: check backend URL/CORS or set REACT_APP_API_BASE_URL.');
+      } else {
+        setError(error.response?.data?.error || error.message || 'Failed to load diagnoses');
+      }
       setDiagnoses([]);
     } finally {
       setLoading(false);

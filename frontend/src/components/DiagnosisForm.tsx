@@ -46,7 +46,18 @@ interface AIAnalysis {
   error?: string;
 }
 
+type MedicationField = keyof Omit<Medication, 'id'>;
+
 const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
+  const createMedicationDraft = (): Medication => ({
+    id: Date.now() + Math.floor(Math.random() * 1000),
+    medication_name: '',
+    dosage: '',
+    frequency: '',
+    duration: '',
+    instructions: '',
+  });
+
   const [formData, setFormData] = useState<FormData>({
     patient_name: '',
     patient_id: '',
@@ -54,25 +65,80 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
     clinical_notes: '',
     diagnosis_text: '',
   });
-  
+
   const [aiAnalysis, setAiAnalysis] = useState<AIAnalysis | null>(null);
   const [loading, setLoading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [medications, setMedications] = useState<Medication[]>([]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-    setFormData({
-      ...formData,
+    setFormData((prev) => ({
+      ...prev,
       [e.target.name]: e.target.value,
-    });
+    }));
   };
 
   const removeMedication = (id: number) => {
-    setMedications(medications.filter(med => med.id !== id));
+    setMedications((prev) => prev.filter((med) => med.id !== id));
   };
 
-  const addAIMedication = (aiMed: Medication) => {
-    setMedications([...medications, { ...aiMed, id: Date.now() }]);
+  const addMedicationRow = () => {
+    setMedications((prev) => [...prev, createMedicationDraft()]);
+  };
+
+  const updateMedicationField = (id: number, field: MedicationField, value: string) => {
+    setMedications((prev) =>
+      prev.map((med) => (med.id === id ? { ...med, [field]: value } : med))
+    );
+  };
+
+  const normalizeMedicationKey = (med: Omit<Medication, 'id'>) =>
+    `${med.medication_name.trim().toLowerCase()}|${med.dosage.trim().toLowerCase()}|${med.frequency
+      .trim()
+      .toLowerCase()}|${med.duration.trim().toLowerCase()}`;
+
+  const mergeAIMedications = (existing: Medication[], aiMeds: Medication[]) => {
+    const existingKeys = new Set(
+      existing.map((med) =>
+        normalizeMedicationKey({
+          medication_name: med.medication_name,
+          dosage: med.dosage,
+          frequency: med.frequency,
+          duration: med.duration,
+          instructions: med.instructions,
+        })
+      )
+    );
+
+    const aiDrafts = aiMeds
+      .map((med) => ({
+        id: Date.now() + Math.floor(Math.random() * 1000),
+        medication_name: med.medication_name?.trim() || '',
+        dosage: med.dosage?.trim() || '',
+        frequency: med.frequency?.trim() || '',
+        duration: med.duration?.trim() || '',
+        instructions: med.instructions?.trim() || '',
+      }))
+      .filter((med) => med.medication_name);
+
+    const uniqueAIMeds = aiDrafts.filter((med) => {
+      const key = normalizeMedicationKey({
+        medication_name: med.medication_name,
+        dosage: med.dosage,
+        frequency: med.frequency,
+        duration: med.duration,
+        instructions: med.instructions,
+      });
+
+      if (existingKeys.has(key)) {
+        return false;
+      }
+
+      existingKeys.add(key);
+      return true;
+    });
+
+    return [...existing, ...uniqueAIMeds];
   };
 
   const handleAnalyzeSymptoms = async () => {
@@ -87,7 +153,14 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
         symptoms: formData.symptoms,
         clinical_notes: formData.clinical_notes,
       });
-      setAiAnalysis(response.data);
+
+      const analysis = response.data;
+      setAiAnalysis(analysis);
+
+      const aiMeds: Medication[] = Array.isArray(analysis?.medications) ? analysis.medications : [];
+      if (aiMeds.length > 0) {
+        setMedications((prev) => mergeAIMedications(prev, aiMeds));
+      }
     } catch (error: any) {
       alert(`Error: ${error.response?.data?.error || error.message}`);
     } finally {
@@ -97,32 +170,43 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    if (!formData.diagnosis_text) {
+
+    if (!formData.diagnosis_text.trim()) {
       alert('Please enter a final diagnosis');
       return;
     }
 
-    setLoading(true);
+    const preparedMedications = medications
+      .map(({ id, ...med }) => ({
+        medication_name: med.medication_name.trim(),
+        dosage: med.dosage.trim(),
+        frequency: med.frequency.trim(),
+        duration: med.duration.trim(),
+        instructions: med.instructions.trim(),
+      }))
+      .filter((med) => med.medication_name || med.dosage || med.frequency || med.duration || med.instructions);
 
+    const hasIncompleteMedication = preparedMedications.some(
+      (med) => !med.medication_name || !med.dosage || !med.frequency || !med.duration
+    );
+    if (hasIncompleteMedication) {
+      alert('Each medication must include name, dosage, frequency, and duration.');
+      return;
+    }
+
+    setLoading(true);
     try {
       const dataToSubmit = {
         ...formData,
         ai_prediction: aiAnalysis,
         status: 'pending',
+        medications: preparedMedications,
       };
-      
-      const response = await diagnosisAPI.createDiagnosis(dataToSubmit);
-      
-      if (medications.length > 0) {
-        for (const med of medications) {
-          const { id, ...medData } = med;
-          await diagnosisAPI.addMedication(response.data.id, medData);
-        }
-      }
-      
-      alert('✓ Diagnosis saved successfully');
-      
+
+      await diagnosisAPI.createDiagnosis(dataToSubmit);
+
+      alert('Diagnosis saved successfully');
+
       setFormData({
         patient_name: '',
         patient_id: '',
@@ -132,8 +216,10 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
       });
       setAiAnalysis(null);
       setMedications([]);
-      
-      if (onSuccess) onSuccess();
+
+      if (onSuccess) {
+        onSuccess();
+      }
     } catch (error: any) {
       alert(`Error: ${error.response?.data?.error || error.message}`);
     } finally {
@@ -144,7 +230,6 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
   return (
     <div className="max-w-5xl mx-auto px-4">
       <div className="bg-white rounded-lg border border-gray-200">
-        {/* Header */}
         <div className="border-b border-gray-200 px-6 py-4">
           <div className="flex items-center justify-between">
             <div>
@@ -172,9 +257,8 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
             </button>
           </div>
         </div>
-      
+
         <form onSubmit={handleSubmit} className="p-6 space-y-6">
-          {/* Patient Information */}
           <div>
             <h3 className="text-sm font-medium text-gray-900 mb-3">Patient Information</h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -205,10 +289,9 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
             </div>
           </div>
 
-          {/* Clinical Information */}
           <div>
             <h3 className="text-sm font-medium text-gray-900 mb-3">Clinical Information</h3>
-            
+
             <div className="space-y-4">
               <div>
                 <label className="label">Symptoms *</label>
@@ -237,7 +320,6 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
             </div>
           </div>
 
-          {/* AI Analysis Button */}
           <div className="flex justify-center py-2">
             <button
               type="button"
@@ -249,40 +331,36 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
             </button>
           </div>
 
-          {/* AI Analysis Results */}
           {aiAnalysis && !aiAnalysis.error && (
             <div className="border border-blue-200 bg-blue-50 rounded-lg p-4 space-y-4">
               <div className="border-b border-blue-200 pb-3">
                 <h3 className="text-sm font-semibold text-gray-900">Med42-v3 Clinical Analysis</h3>
               </div>
 
-              {/* Red Flag Alert */}
               {aiAnalysis.red_flag_analysis?.has_red_flags && (
                 <div className="bg-red-50 border border-red-200 rounded p-3">
                   <div className="flex items-start gap-2">
-                    <span className="text-red-600 font-semibold text-sm">⚠ RED FLAGS - {aiAnalysis.red_flag_analysis.urgency_level}</span>
+                    <span className="text-red-600 font-semibold text-sm">
+                      RED FLAGS - {aiAnalysis.red_flag_analysis.urgency_level}
+                    </span>
                   </div>
                   <div className="mt-2 space-y-1">
                     {aiAnalysis.red_flag_analysis.detected_flags.map((flag, idx) => (
                       <div key={idx} className="text-xs text-red-800">
-                        • {flag.flag.replace(/_/g, ' ')}: {flag.keyword}
+                        - {flag.flag.replace(/_/g, ' ')}: {flag.keyword}
                       </div>
                     ))}
                   </div>
                 </div>
               )}
-            
-              {/* Clinical Reasoning */}
+
               {aiAnalysis.clinical_reasoning && (
                 <div className="bg-white border border-gray-200 rounded p-3">
                   <h4 className="text-xs font-semibold text-gray-700 mb-2">Clinical Reasoning</h4>
-                  <div className="clinical-content text-xs">
-                    {formatAIOutput(aiAnalysis.clinical_reasoning)}
-                  </div>
+                  <div className="clinical-content text-xs">{formatAIOutput(aiAnalysis.clinical_reasoning)}</div>
                 </div>
               )}
 
-              {/* Confidence Score */}
               <div className="bg-white border border-gray-200 rounded p-3">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-xs font-medium text-gray-700">Confidence</span>
@@ -291,7 +369,7 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
                   </span>
                 </div>
                 <div className="w-full bg-gray-200 rounded h-2">
-                  <div 
+                  <div
                     className="h-2 rounded bg-blue-600 transition-all"
                     style={{ width: `${safeNumber(aiAnalysis.confidence_score) * 100}%` }}
                   ></div>
@@ -301,7 +379,6 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
                 )}
               </div>
 
-              {/* Keywords */}
               {aiAnalysis.keywords && aiAnalysis.keywords.length > 0 && (
                 <div>
                   <p className="text-xs font-medium text-gray-700 mb-2">Clinical Features</p>
@@ -318,20 +395,23 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
                 </div>
               )}
 
-              {/* Differential Diagnoses */}
               {aiAnalysis.suggested_diagnoses && aiAnalysis.suggested_diagnoses.length > 0 && (
                 <div>
                   <p className="text-xs font-medium text-gray-700 mb-2">Differential Diagnosis</p>
                   <div className="space-y-2">
                     {aiAnalysis.suggested_diagnoses.map((diag, index) => (
                       <div key={index} className="flex items-center gap-3 bg-white border border-gray-200 rounded p-2">
-                        <span className={`w-6 h-6 rounded text-xs font-semibold flex items-center justify-center ${index === 0 ? 'bg-green-600 text-white' : 'bg-blue-600 text-white'}`}>
+                        <span
+                          className={`w-6 h-6 rounded text-xs font-semibold flex items-center justify-center ${
+                            index === 0 ? 'bg-green-600 text-white' : 'bg-blue-600 text-white'
+                          }`}
+                        >
                           {index + 1}
                         </span>
                         <span className="flex-1 text-xs text-gray-900">{diag.term}</span>
                         <div className="flex items-center gap-2">
                           <div className="w-20 bg-gray-200 rounded h-1.5">
-                            <div 
+                            <div
                               className={`h-1.5 rounded ${index === 0 ? 'bg-green-600' : 'bg-blue-600'}`}
                               style={{ width: `${safeNumber(diag.score) * 100}%` }}
                             ></div>
@@ -346,40 +426,37 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
                 </div>
               )}
 
-              {/* AI-Suggested Medications */}
               {aiAnalysis.medications && aiAnalysis.medications.length > 0 && (
                 <div>
                   <p className="text-xs font-medium text-gray-700 mb-2">AI-Suggested Medications</p>
+                  <p className="text-xs text-gray-500 mb-2">
+                    Detected medications are auto-filled in the medication editor below. Review and adjust before saving.
+                  </p>
                   <div className="space-y-2">
                     {aiAnalysis.medications.map((med, index) => (
                       <div key={index} className="flex items-start gap-2 bg-white border border-gray-200 rounded p-2">
                         <div className="flex-1">
                           <p className="text-xs font-medium text-gray-900">{med.medication_name}</p>
                           <p className="text-xs text-gray-600 mt-1">
-                            {med.dosage} • {med.frequency} • {med.duration}
+                            {med.dosage} - {med.frequency} - {med.duration}
                           </p>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => addAIMedication(med)}
-                          className="text-xs px-2 py-1 bg-purple-600 text-white rounded hover:bg-purple-700 transition-colors"
-                        >
-                          Add
-                        </button>
+                        <span className="text-xs px-2 py-1 bg-green-100 text-green-800 rounded border border-green-200">
+                          Auto-filled
+                        </span>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
 
-              {/* Recommendations */}
               {aiAnalysis.recommendations && aiAnalysis.recommendations.length > 0 && (
                 <div className="bg-green-50 border border-green-200 rounded p-3">
                   <p className="text-xs font-semibold text-green-900 mb-2">Recommended Workup</p>
                   <ul className="space-y-1">
                     {aiAnalysis.recommendations.map((rec, index) => (
                       <li key={index} className="text-xs text-green-800 flex items-start gap-1">
-                        <span>•</span>
+                        <span>-</span>
                         <span>{rec}</span>
                       </li>
                     ))}
@@ -395,7 +472,6 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
             </div>
           )}
 
-          {/* Final Diagnosis */}
           <div>
             <label className="label">Final Diagnosis *</label>
             <textarea
@@ -409,33 +485,96 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
             />
           </div>
 
-          {/* Medications List */}
-          {medications.length > 0 && (
-            <div>
-              <p className="text-xs font-medium text-gray-700 mb-2">Medications to Prescribe ({medications.length})</p>
-              <div className="space-y-2">
-                {medications.map((med) => (
-                  <div key={med.id} className="flex items-start gap-2 bg-gray-50 border border-gray-200 rounded p-2">
-                    <div className="flex-1">
-                      <p className="text-xs font-medium text-gray-900">{med.medication_name}</p>
-                      <p className="text-xs text-gray-600 mt-1">
-                        {med.dosage} • {med.frequency} • {med.duration}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => removeMedication(med.id!)}
-                      className="text-red-600 hover:text-red-800 text-sm font-bold"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ))}
-              </div>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-sm font-medium text-gray-900">
+                Medications {medications.length > 0 ? `(${medications.length})` : ''}
+              </p>
+              <button
+                type="button"
+                onClick={addMedicationRow}
+                className="text-xs px-3 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+              >
+                + Add Medication
+              </button>
             </div>
-          )}
 
-          {/* Submit Button */}
+            {medications.length === 0 && (
+              <p className="text-xs text-gray-500 border border-dashed border-gray-300 rounded p-3">
+                No medications added yet. AI-detected medications will be auto-filled after analysis.
+              </p>
+            )}
+
+            {medications.map((med, index) => (
+              <div key={med.id || index} className="border border-gray-200 rounded p-3 bg-gray-50 space-y-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-semibold text-gray-700">Medication #{index + 1}</p>
+                  <button
+                    type="button"
+                    onClick={() => med.id && removeMedication(med.id)}
+                    className="text-xs px-2 py-1 border border-red-200 text-red-700 rounded hover:bg-red-50 transition-colors"
+                  >
+                    Remove
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <label className="label">Medication Name *</label>
+                    <input
+                      type="text"
+                      value={med.medication_name}
+                      onChange={(e) => med.id && updateMedicationField(med.id, 'medication_name', e.target.value)}
+                      className="input-field"
+                      placeholder="e.g. Amoxicillin"
+                    />
+                  </div>
+                  <div>
+                    <label className="label">Dosage *</label>
+                    <input
+                      type="text"
+                      value={med.dosage}
+                      onChange={(e) => med.id && updateMedicationField(med.id, 'dosage', e.target.value)}
+                      className="input-field"
+                      placeholder="e.g. 500 mg"
+                    />
+                  </div>
+                  <div>
+                    <label className="label">Frequency *</label>
+                    <input
+                      type="text"
+                      value={med.frequency}
+                      onChange={(e) => med.id && updateMedicationField(med.id, 'frequency', e.target.value)}
+                      className="input-field"
+                      placeholder="e.g. PO every 8 hours"
+                    />
+                  </div>
+                  <div>
+                    <label className="label">Duration *</label>
+                    <input
+                      type="text"
+                      value={med.duration}
+                      onChange={(e) => med.id && updateMedicationField(med.id, 'duration', e.target.value)}
+                      className="input-field"
+                      placeholder="e.g. 7 days"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="label">Instructions</label>
+                  <textarea
+                    value={med.instructions}
+                    onChange={(e) => med.id && updateMedicationField(med.id, 'instructions', e.target.value)}
+                    rows={2}
+                    className="input-field resize-none"
+                    placeholder="Additional instructions, safety notes, or counseling points..."
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+
           <div className="flex gap-2 pt-4 border-t border-gray-200">
             <button
               type="submit"
