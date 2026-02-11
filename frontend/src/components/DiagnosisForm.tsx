@@ -1,6 +1,13 @@
 import React, { useState } from 'react';
 import { diagnosisAPI } from '../services/api';
 import { formatAIOutput, safeNumber, formatPercentage } from '../utils/formatUtils';
+import {
+  defaultMedicationSchedule,
+  inferScheduleFromFrequency,
+  buildFrequencyFromSchedule,
+  isScheduleComplete,
+  MedicationScheduleFields,
+} from '../utils/medicationSchedule';
 
 interface DiagnosisFormProps {
   onSuccess?: () => void;
@@ -14,7 +21,7 @@ interface FormData {
   diagnosis_text: string;
 }
 
-interface Medication {
+interface Medication extends MedicationScheduleFields {
   id?: number;
   medication_name: string;
   dosage: string;
@@ -43,6 +50,12 @@ interface AIAnalysis {
       severity: string;
     }>;
   };
+  validator_info?: {
+    validator_status: string;
+    safety_passed: boolean;
+    issues?: string[];
+    hallucination_flags?: string[];
+  };
   error?: string;
 }
 
@@ -54,6 +67,7 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
     medication_name: '',
     dosage: '',
     frequency: '',
+    ...defaultMedicationSchedule(),
     duration: '',
     instructions: '',
   });
@@ -70,6 +84,8 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
   const [loading, setLoading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [medications, setMedications] = useState<Medication[]>([]);
+  const [streamStatuses, setStreamStatuses] = useState<string[]>([]);
+  const [streamedPreview, setStreamedPreview] = useState('');
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     setFormData((prev) => ({
@@ -86,7 +102,7 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
     setMedications((prev) => [...prev, createMedicationDraft()]);
   };
 
-  const updateMedicationField = (id: number, field: MedicationField, value: string) => {
+  const updateMedicationField = <K extends MedicationField>(id: number, field: K, value: Medication[K]) => {
     setMedications((prev) =>
       prev.map((med) => (med.id === id ? { ...med, [field]: value } : med))
     );
@@ -95,7 +111,13 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
   const normalizeMedicationKey = (med: Omit<Medication, 'id'>) =>
     `${med.medication_name.trim().toLowerCase()}|${med.dosage.trim().toLowerCase()}|${med.frequency
       .trim()
-      .toLowerCase()}|${med.duration.trim().toLowerCase()}`;
+      .toLowerCase()}|${med.duration.trim().toLowerCase()}|${med.schedule_type}|${med.every_hours || ''}|${
+      med.times_per_day || ''
+    }|${med.take_morning ? '1' : '0'}${med.take_noon ? '1' : '0'}${med.take_evening ? '1' : '0'}${
+      med.take_bedtime ? '1' : '0'
+    }${med.take_with_breakfast ? '1' : '0'}${med.take_with_lunch ? '1' : '0'}${
+      med.take_with_dinner ? '1' : '0'
+    }`;
 
   const mergeAIMedications = (existing: Medication[], aiMeds: Medication[]) => {
     const existingKeys = new Set(
@@ -104,6 +126,16 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
           medication_name: med.medication_name,
           dosage: med.dosage,
           frequency: med.frequency,
+          schedule_type: med.schedule_type,
+          every_hours: med.every_hours,
+          times_per_day: med.times_per_day,
+          take_morning: med.take_morning,
+          take_noon: med.take_noon,
+          take_evening: med.take_evening,
+          take_bedtime: med.take_bedtime,
+          take_with_breakfast: med.take_with_breakfast,
+          take_with_lunch: med.take_with_lunch,
+          take_with_dinner: med.take_with_dinner,
           duration: med.duration,
           instructions: med.instructions,
         })
@@ -111,14 +143,47 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
     );
 
     const aiDrafts = aiMeds
-      .map((med) => ({
-        id: Date.now() + Math.floor(Math.random() * 1000),
-        medication_name: med.medication_name?.trim() || '',
-        dosage: med.dosage?.trim() || '',
-        frequency: med.frequency?.trim() || '',
-        duration: med.duration?.trim() || '',
-        instructions: med.instructions?.trim() || '',
-      }))
+      .map((med) => {
+        const inferredSchedule = inferScheduleFromFrequency(med.frequency || '');
+        const schedule = {
+          schedule_type: med.schedule_type || inferredSchedule.schedule_type,
+          every_hours:
+            typeof med.every_hours === 'number' ? med.every_hours : inferredSchedule.every_hours,
+          times_per_day:
+            typeof med.times_per_day === 'number' ? med.times_per_day : inferredSchedule.times_per_day,
+          take_morning: Boolean(
+            med.take_morning ?? inferredSchedule.take_morning
+          ),
+          take_noon: Boolean(
+            med.take_noon ?? inferredSchedule.take_noon
+          ),
+          take_evening: Boolean(
+            med.take_evening ?? inferredSchedule.take_evening
+          ),
+          take_bedtime: Boolean(
+            med.take_bedtime ?? inferredSchedule.take_bedtime
+          ),
+          take_with_breakfast: Boolean(
+            med.take_with_breakfast ?? inferredSchedule.take_with_breakfast
+          ),
+          take_with_lunch: Boolean(
+            med.take_with_lunch ?? inferredSchedule.take_with_lunch
+          ),
+          take_with_dinner: Boolean(
+            med.take_with_dinner ?? inferredSchedule.take_with_dinner
+          ),
+        };
+
+        return {
+          id: Date.now() + Math.floor(Math.random() * 1000),
+          medication_name: med.medication_name?.trim() || '',
+          dosage: med.dosage?.trim() || '',
+          frequency: buildFrequencyFromSchedule(schedule, med.frequency?.trim() || ''),
+          ...schedule,
+          duration: med.duration?.trim() || '',
+          instructions: med.instructions?.trim() || '',
+        };
+      })
       .filter((med) => med.medication_name);
 
     const uniqueAIMeds = aiDrafts.filter((med) => {
@@ -126,6 +191,16 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
         medication_name: med.medication_name,
         dosage: med.dosage,
         frequency: med.frequency,
+        schedule_type: med.schedule_type,
+        every_hours: med.every_hours,
+        times_per_day: med.times_per_day,
+        take_morning: med.take_morning,
+        take_noon: med.take_noon,
+        take_evening: med.take_evening,
+        take_bedtime: med.take_bedtime,
+        take_with_breakfast: med.take_with_breakfast,
+        take_with_lunch: med.take_with_lunch,
+        take_with_dinner: med.take_with_dinner,
         duration: med.duration,
         instructions: med.instructions,
       });
@@ -148,21 +223,72 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
     }
 
     setAnalyzing(true);
+    setStreamStatuses([]);
+    setStreamedPreview('');
     try {
-      const response = await diagnosisAPI.analyzeSymptoms({
-        symptoms: formData.symptoms,
-        clinical_notes: formData.clinical_notes,
-      });
+      const payload = await diagnosisAPI.analyzeSymptomsStream(
+        {
+          symptoms: formData.symptoms,
+          clinical_notes: formData.clinical_notes,
+        },
+        {
+          onStatus: (eventPayload) => {
+            const message = eventPayload?.message ? String(eventPayload.message) : '';
+            if (!message) return;
+            setStreamStatuses((prev) => {
+              if (prev[prev.length - 1] === message) return prev;
+              return [...prev, message];
+            });
+          },
+          onValidation: (eventPayload) => {
+            const issues = Array.isArray(eventPayload?.issues) ? eventPayload.issues : [];
+            const message =
+              issues.length > 0
+                ? `Validation: ${issues[0]}`
+                : `Validation: ${eventPayload?.safety_passed ? 'Safety checks passed' : 'Safety issues detected'}`;
+            setStreamStatuses((prev) => [...prev, message]);
+          },
+          onToken: (eventPayload) => {
+            const tokenText = eventPayload?.text ? String(eventPayload.text) : '';
+            if (!tokenText) return;
+            setStreamedPreview((prev) => `${prev}${tokenText}`);
+          },
+          onError: (eventPayload) => {
+            const message = eventPayload?.message ? String(eventPayload.message) : 'Stream error';
+            setStreamStatuses((prev) => [...prev, message]);
+          },
+        }
+      );
 
-      const analysis = response.data;
-      setAiAnalysis(analysis);
-
-      const aiMeds: Medication[] = Array.isArray(analysis?.medications) ? analysis.medications : [];
-      if (aiMeds.length > 0) {
-        setMedications((prev) => mergeAIMedications(prev, aiMeds));
+      const analysis = payload?.ai_analysis || null;
+      if (analysis) {
+        setAiAnalysis(analysis);
+        const aiMeds: Medication[] = Array.isArray(analysis?.medications) ? analysis.medications : [];
+        if (aiMeds.length > 0) {
+          setMedications((prev) => mergeAIMedications(prev, aiMeds));
+        }
+      } else {
+        throw new Error('Stream completed without analysis payload');
       }
     } catch (error: any) {
-      alert(`Error: ${error.response?.data?.error || error.message}`);
+      try {
+        const response = await diagnosisAPI.analyzeSymptoms({
+          symptoms: formData.symptoms,
+          clinical_notes: formData.clinical_notes,
+        });
+        const fallbackAnalysis = response.data;
+        setAiAnalysis(fallbackAnalysis);
+
+        const aiMeds: Medication[] = Array.isArray(fallbackAnalysis?.medications)
+          ? fallbackAnalysis.medications
+          : [];
+        if (aiMeds.length > 0) {
+          setMedications((prev) => mergeAIMedications(prev, aiMeds));
+        }
+        setStreamStatuses((prev) => [...prev, 'Fallback mode used: non-stream analysis completed.']);
+      } catch (fallbackError: any) {
+        alert(`Error: ${fallbackError.response?.data?.error || fallbackError.message || error.message}`);
+      }
     } finally {
       setAnalyzing(false);
     }
@@ -177,20 +303,57 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
     }
 
     const preparedMedications = medications
-      .map(({ id, ...med }) => ({
-        medication_name: med.medication_name.trim(),
-        dosage: med.dosage.trim(),
-        frequency: med.frequency.trim(),
-        duration: med.duration.trim(),
-        instructions: med.instructions.trim(),
-      }))
-      .filter((med) => med.medication_name || med.dosage || med.frequency || med.duration || med.instructions);
+      .map(({ id, ...med }) => {
+        const schedule = {
+          schedule_type: med.schedule_type,
+          every_hours: med.every_hours ? Number(med.every_hours) : null,
+          times_per_day: med.times_per_day ? Number(med.times_per_day) : null,
+          take_morning: med.take_morning,
+          take_noon: med.take_noon,
+          take_evening: med.take_evening,
+          take_bedtime: med.take_bedtime,
+          take_with_breakfast: med.take_with_breakfast,
+          take_with_lunch: med.take_with_lunch,
+          take_with_dinner: med.take_with_dinner,
+        };
+
+        return {
+          medication_name: med.medication_name.trim(),
+          dosage: med.dosage.trim(),
+          frequency: buildFrequencyFromSchedule(schedule, med.frequency.trim()),
+          ...schedule,
+          duration: med.duration.trim(),
+          instructions: med.instructions.trim(),
+        };
+      })
+      .filter(
+        (med) =>
+          med.medication_name || med.dosage || med.frequency || med.duration || med.instructions
+      );
 
     const hasIncompleteMedication = preparedMedications.some(
-      (med) => !med.medication_name || !med.dosage || !med.frequency || !med.duration
+      (med) =>
+        !med.medication_name ||
+        !med.dosage ||
+        !med.duration ||
+        !isScheduleComplete(
+          {
+            schedule_type: med.schedule_type,
+            every_hours: med.every_hours,
+            times_per_day: med.times_per_day,
+            take_morning: med.take_morning,
+            take_noon: med.take_noon,
+            take_evening: med.take_evening,
+            take_bedtime: med.take_bedtime,
+            take_with_breakfast: med.take_with_breakfast,
+            take_with_lunch: med.take_with_lunch,
+            take_with_dinner: med.take_with_dinner,
+          },
+          med.frequency
+        )
     );
     if (hasIncompleteMedication) {
-      alert('Each medication must include name, dosage, frequency, and duration.');
+      alert('Each medication must include name, dosage, duration, and a valid schedule (frequency text or structured timing).');
       return;
     }
 
@@ -331,6 +494,29 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
             </button>
           </div>
 
+          {analyzing && (
+            <div className="border border-gray-200 bg-gray-50 rounded-lg p-4 space-y-3">
+              <h3 className="text-sm font-semibold text-gray-900">Hybrid AI Progress</h3>
+              {streamStatuses.length > 0 ? (
+                <ul className="space-y-1">
+                  {streamStatuses.map((message, index) => (
+                    <li key={`${message}-${index}`} className="text-xs text-gray-700">
+                      {index + 1}. {message}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-xs text-gray-600">Initializing analysis...</p>
+              )}
+              {streamedPreview && (
+                <div className="bg-white border border-gray-200 rounded p-2">
+                  <p className="text-xs font-medium text-gray-700 mb-1">Live Clinical Draft</p>
+                  <p className="text-xs text-gray-700 whitespace-pre-wrap line-clamp-6">{streamedPreview}</p>
+                </div>
+              )}
+            </div>
+          )}
+
           {aiAnalysis && !aiAnalysis.error && (
             <div className="border border-blue-200 bg-blue-50 rounded-lg p-4 space-y-4">
               <div className="border-b border-blue-200 pb-3">
@@ -463,6 +649,25 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
                   </ul>
                 </div>
               )}
+
+              {aiAnalysis.validator_info && (
+                <div className="bg-white border border-gray-200 rounded p-3">
+                  <p className="text-xs font-semibold text-gray-800 mb-2">Secondary Validation (watsonx)</p>
+                  <p className="text-xs text-gray-700">
+                    Status: {aiAnalysis.validator_info.validator_status} | Safety:{' '}
+                    {aiAnalysis.validator_info.safety_passed ? 'Passed' : 'Review Required'}
+                  </p>
+                  {aiAnalysis.validator_info.issues && aiAnalysis.validator_info.issues.length > 0 && (
+                    <ul className="mt-2 space-y-1">
+                      {aiAnalysis.validator_info.issues.map((issue, idx) => (
+                        <li key={idx} className="text-xs text-red-700">
+                          - {issue}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -540,13 +745,13 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
                     />
                   </div>
                   <div>
-                    <label className="label">Frequency *</label>
+                    <label className="label">Frequency (summary)</label>
                     <input
                       type="text"
                       value={med.frequency}
                       onChange={(e) => med.id && updateMedicationField(med.id, 'frequency', e.target.value)}
                       className="input-field"
-                      placeholder="e.g. PO every 8 hours"
+                      placeholder="e.g. Every 8 hours"
                     />
                   </div>
                   <div>
@@ -560,6 +765,138 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
                     />
                   </div>
                 </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div>
+                    <label className="label">Schedule Type *</label>
+                    <select
+                      value={med.schedule_type}
+                      onChange={(e) => {
+                        if (!med.id) return;
+                        const nextType = e.target.value as Medication['schedule_type'];
+                        updateMedicationField(med.id, 'schedule_type', nextType);
+                        if (nextType !== 'per_hour') updateMedicationField(med.id, 'every_hours', null);
+                        if (nextType !== 'per_day') updateMedicationField(med.id, 'times_per_day', null);
+                      }}
+                      className="input-field"
+                    >
+                      <option value="free_text">Free text frequency</option>
+                      <option value="per_hour">Every X hours</option>
+                      <option value="per_day">X times per day</option>
+                      <option value="specific_times">Specific times</option>
+                    </select>
+                  </div>
+
+                  {med.schedule_type === 'per_hour' && (
+                    <div>
+                      <label className="label">Every (hours) *</label>
+                      <input
+                        type="number"
+                        min={1}
+                        value={med.every_hours ?? ''}
+                        onChange={(e) =>
+                          med.id &&
+                          updateMedicationField(
+                            med.id,
+                            'every_hours',
+                            e.target.value ? Number(e.target.value) : null
+                          )
+                        }
+                        className="input-field"
+                        placeholder="e.g. 8"
+                      />
+                    </div>
+                  )}
+
+                  {med.schedule_type === 'per_day' && (
+                    <div>
+                      <label className="label">Times per day *</label>
+                      <input
+                        type="number"
+                        min={1}
+                        value={med.times_per_day ?? ''}
+                        onChange={(e) =>
+                          med.id &&
+                          updateMedicationField(
+                            med.id,
+                            'times_per_day',
+                            e.target.value ? Number(e.target.value) : null
+                          )
+                        }
+                        className="input-field"
+                        placeholder="e.g. 2"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {med.schedule_type === 'specific_times' && (
+                  <div className="border border-gray-200 rounded p-3 bg-white">
+                    <p className="text-xs font-medium text-gray-700 mb-2">Select administration times *</p>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                      <label className="text-xs text-gray-700 flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={med.take_morning}
+                          onChange={(e) => med.id && updateMedicationField(med.id, 'take_morning', e.target.checked)}
+                        />
+                        Morning
+                      </label>
+                      <label className="text-xs text-gray-700 flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={med.take_noon}
+                          onChange={(e) => med.id && updateMedicationField(med.id, 'take_noon', e.target.checked)}
+                        />
+                        Noon
+                      </label>
+                      <label className="text-xs text-gray-700 flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={med.take_evening}
+                          onChange={(e) => med.id && updateMedicationField(med.id, 'take_evening', e.target.checked)}
+                        />
+                        Evening
+                      </label>
+                      <label className="text-xs text-gray-700 flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={med.take_bedtime}
+                          onChange={(e) => med.id && updateMedicationField(med.id, 'take_bedtime', e.target.checked)}
+                        />
+                        Bedtime
+                      </label>
+                      <label className="text-xs text-gray-700 flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={med.take_with_breakfast}
+                          onChange={(e) =>
+                            med.id && updateMedicationField(med.id, 'take_with_breakfast', e.target.checked)
+                          }
+                        />
+                        With breakfast
+                      </label>
+                      <label className="text-xs text-gray-700 flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={med.take_with_lunch}
+                          onChange={(e) => med.id && updateMedicationField(med.id, 'take_with_lunch', e.target.checked)}
+                        />
+                        With lunch
+                      </label>
+                      <label className="text-xs text-gray-700 flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={med.take_with_dinner}
+                          onChange={(e) =>
+                            med.id && updateMedicationField(med.id, 'take_with_dinner', e.target.checked)
+                          }
+                        />
+                        With dinner
+                      </label>
+                    </div>
+                  </div>
+                )}
 
                 <div>
                   <label className="label">Instructions</label>

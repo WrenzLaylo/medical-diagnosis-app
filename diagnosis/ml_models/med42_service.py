@@ -131,6 +131,30 @@ Constraints:
                 'severity': 'URGENT',
                 'ddx': ['Disseminated intravascular coagulation', 'Thrombocytopenia', 'Leukemia', 'Von Willebrand disease'],
                 'workup': ['CBC with differential', 'PT/PTT/INR', 'Fibrinogen', 'Peripheral smear', 'Bone marrow biopsy']
+            },
+            'suicidal_ideation': {
+                'keywords': [
+                    'suicidal ideation',
+                    'suicidal thoughts',
+                    'thoughts of death',
+                    'recurrent thoughts of death',
+                    'self harm',
+                    'self-harm',
+                    'wants to die',
+                ],
+                'severity': 'URGENT',
+                'ddx': [
+                    'Major depressive episode',
+                    'Bipolar depression',
+                    'Substance-induced mood disorder',
+                    'Psychotic disorder',
+                ],
+                'workup': [
+                    'Immediate suicide risk assessment',
+                    'Urgent psychiatric evaluation',
+                    'Safety planning and close monitoring',
+                    'Consider emergency referral/hospitalization',
+                ],
             }
         }
     
@@ -259,6 +283,32 @@ Constraints:
                 'typical': ['sneezing', 'rhinorrhea', 'nasal_congestion', 'itching'],
                 'may_have': ['conjunctivitis', 'post_nasal_drip'],
                 'should_not_have': ['hemoptysis', 'chronic_epistaxis', 'systemic_symptoms']
+            },
+            'influenza_like_illness': {
+                'required': ['fever', 'cough'],
+                'typical': ['body_aches', 'headache', 'sore_throat', 'rhinorrhea'],
+                'may_have': ['fatigue', 'chills'],
+                'should_not_have': ['hemoptysis', 'severe_abdominal_pain']
+            },
+            'viral_upper_respiratory_infection': {
+                'required': ['cough'],
+                'typical': ['rhinorrhea', 'nasal_congestion', 'sore_throat'],
+                'may_have': ['fever', 'body_aches', 'headache'],
+                'should_not_have': ['hemoptysis', 'chest_pain_severe', 'dyspnea_severe']
+            },
+            'major_depressive_episode': {
+                'required': ['depressed_mood'],
+                'typical': [
+                    'anhedonia',
+                    'insomnia',
+                    'fatigue',
+                    'worthlessness',
+                    'poor_concentration',
+                    'psychomotor_retardation',
+                    'suicidal_ideation',
+                ],
+                'may_have': ['weight_loss', 'guilt', 'hopelessness'],
+                'should_not_have': ['manic_symptoms'],
             }
         }
 
@@ -318,6 +368,24 @@ Constraints:
                     'duration': 'As needed',
                     'instructions': 'Non-sedating antihistamine for allergic symptoms.'
                 }
+            ],
+            'influenza-like illness': [
+                {
+                    'medication_name': 'Acetaminophen',
+                    'dosage': '500 mg',
+                    'frequency': 'PO every 6-8 hours PRN',
+                    'duration': '3 days',
+                    'instructions': 'Supportive care for fever and body aches; avoid duplicate acetaminophen products.'
+                }
+            ],
+            'viral upper respiratory infection': [
+                {
+                    'medication_name': 'Cetirizine',
+                    'dosage': '10 mg',
+                    'frequency': 'PO once daily PRN',
+                    'duration': '3-5 days',
+                    'instructions': 'Symptomatic relief for runny nose and sneezing; re-evaluate if symptoms worsen.'
+                }
             ]
         }
 
@@ -335,6 +403,9 @@ Constraints:
             'ibs': 'Irritable bowel syndrome',
             'gerd': 'Gastroesophageal reflux disease',
             'copd': 'COPD',
+            'influenza_like_illness': 'Influenza-like illness',
+            'viral_upper_respiratory_infection': 'Viral upper respiratory infection',
+            'major_depressive_episode': 'Major depressive episode',
         }
         if condition in aliases:
             return aliases[condition]
@@ -367,6 +438,33 @@ Constraints:
             if self._is_present_and_not_negated(term, text):
                 return True
         return False
+
+    def _normalize_multilingual_symptoms(self, text: str) -> str:
+        """Normalize common Filipino symptom phrases to clinically standard English."""
+        normalized = re.sub(r'\s+', ' ', str(text or '').strip())
+        if not normalized:
+            return ''
+
+        replacements = [
+            (r'\bsakit\s+ng\s+katawan\b', 'body aches'),
+            (r'\bpananakit\s+ng\s+katawan\b', 'body aches'),
+            (r'\bmasakit\s+ang\s+lalamunan\b', 'sore throat'),
+            (r'\bsumasakit\s+ang\s+lalamunan\b', 'sore throat'),
+            (r'\bhirap\s+huminga\b', 'shortness of breath'),
+            (r'\bnahihilo\b', 'dizziness'),
+            (r'\binuubo\b', 'cough'),
+            (r'\bubo\b', 'cough'),
+            (r'\bsipon\b', 'runny nose'),
+            (r'\blagnat\b', 'fever'),
+            (r'\bnilalagnat\b', 'fever'),
+            (r'\btrangkaso\b', 'flu-like illness'),
+            (r'\bmasakit\s+ulo\b', 'headache'),
+        ]
+
+        for pattern, replacement in replacements:
+            normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
+
+        return normalized
 
     def _build_pre_diagnostic_hypotheses(
         self, symptoms_text: str, clinical_notes: str, red_flag_analysis: Dict[str, Any]
@@ -692,13 +790,27 @@ Constraints:
             'vomiting': ['vomit', 'vomits', 'throwing up', 'emesis'],
             'diarrhea': ['loose stools', 'watery stools', 'frequent bowel movements'],
             'constipation': ['hard stools', 'infrequent bowel movements', 'difficulty passing stool'],
-            'fever': ['febrile', 'temperature', 'high temperature', 'pyrexia'],
+            'fever': ['febrile', 'temperature', 'high temperature', 'pyrexia', 'lagnat'],
             'fatigue': ['tiredness', 'tired', 'exhaustion', 'exhausted', 'weakness'],
             'headache': ['head pain', 'cephalgia'],
             'nausea': ['nauseous', 'queasy', 'sick to stomach'],
             'dizziness': ['dizzy', 'lightheaded', 'vertigo', 'spinning'],
             'weight loss': ['losing weight', 'unintentional weight loss', 'dropped weight'],
             'night sweats': ['nocturnal sweating', 'sweating at night'],
+            'rhinorrhea': ['runny nose', 'nasal discharge', 'sipon'],
+            'runny nose': ['rhinorrhea', 'nasal discharge', 'sipon'],
+            'nasal congestion': ['stuffy nose', 'blocked nose', 'baradong ilong'],
+            'nasal symptoms': ['runny nose', 'rhinorrhea', 'nasal congestion', 'sneezing', 'sipon'],
+            'body aches': ['myalgia', 'muscle pain', 'body pain', 'sakit ng katawan', 'pananakit ng katawan'],
+            'myalgia': ['body aches', 'muscle aches', 'muscle pain', 'sakit ng katawan'],
+            'sore throat': ['throat pain', 'masakit ang lalamunan'],
+            'depressed mood': ['persistent depressed mood', 'low mood', 'sad mood', 'depression'],
+            'anhedonia': ['diminished interest', 'loss of interest', 'loss of pleasure'],
+            'insomnia': ['early morning awakening', 'sleep disturbance', 'difficulty sleeping'],
+            'worthlessness': ['feelings of worthlessness', 'excessive guilt', 'guilt'],
+            'poor concentration': ['difficulty concentrating', 'indecisiveness', 'poor focus'],
+            'psychomotor retardation': ['slowed speech', 'slowed movements', 'psychomotor slowing'],
+            'suicidal ideation': ['suicidal thoughts', 'thoughts of death', 'self harm', 'self-harm'],
             'gi symptoms': ['gastrointestinal symptoms', 'stomach problems', 'digestive issues', 
                            'gi issues', 'abdominal symptoms'],
             'abnormal bleeding': ['bleeding disorder', 'excessive bleeding', 'prolonged bleeding',
@@ -778,7 +890,8 @@ Constraints:
         red_flag_symptoms = [
             'hemoptysis', 'coughing blood', 'epistaxis', 'nose bleed',
             'chest pain', 'severe headache', 'altered mental', 'confusion',
-            'weight loss', 'night sweats', 'chronic bleeding'
+            'weight loss', 'night sweats', 'chronic bleeding',
+            'suicidal ideation', 'suicidal thoughts', 'thoughts of death', 'self harm', 'self-harm'
         ]
         
         is_benign = any(term in diagnosis_lower for term in benign_conditions)
@@ -814,10 +927,16 @@ Constraints:
     def analyze_symptoms(self, symptoms_text: str, clinical_notes: str = "") -> Dict[str, Any]:
         """Analyze symptoms with red flag detection and pattern validation"""
         try:
+            normalized_symptoms = self._normalize_multilingual_symptoms(symptoms_text)
+            normalized_notes = self._normalize_multilingual_symptoms(clinical_notes)
+
+            analysis_symptoms = normalized_symptoms or str(symptoms_text or '').strip()
+            analysis_notes = normalized_notes or str(clinical_notes or '').strip()
+
             # Step 1: Red flag detection
-            red_flag_analysis = self.detect_red_flags(symptoms_text, clinical_notes)
-            keywords = self._extract_clinical_features(symptoms_text, clinical_notes)
-            hypotheses = self._build_pre_diagnostic_hypotheses(symptoms_text, clinical_notes, red_flag_analysis)
+            red_flag_analysis = self.detect_red_flags(analysis_symptoms, analysis_notes)
+            keywords = self._extract_clinical_features(analysis_symptoms, analysis_notes)
+            hypotheses = self._build_pre_diagnostic_hypotheses(analysis_symptoms, analysis_notes, red_flag_analysis)
             
             print("Analyzing with Med42-v3 (Red Flag Detection + Pattern Validation)...")
             
@@ -827,9 +946,13 @@ Constraints:
                     print(f"   - {flag['flag']}: {flag['keyword']}")
             
             # Step 2: Build compact prompt context
-            full_text = f"Patient presents with: {symptoms_text}"
-            if clinical_notes:
-                full_text += f"\n\nClinical observations: {clinical_notes}"
+            full_text = f"Patient presents with: {analysis_symptoms}"
+            if analysis_notes:
+                full_text += f"\n\nClinical observations: {analysis_notes}"
+
+            original_symptoms = str(symptoms_text or '').strip()
+            if original_symptoms and original_symptoms.lower() != analysis_symptoms.lower():
+                full_text += f"\n\nOriginal patient wording: {original_symptoms}"
             
             # Add red flag context to LLM
             if red_flag_analysis['has_red_flags']:
@@ -855,7 +978,7 @@ Constraints:
             # Step 5: Validate primary diagnosis against symptom patterns
             if parsed['diagnoses']:
                 primary_dx = parsed['diagnoses'][0]['term']
-                combined_input = f"{symptoms_text} {clinical_notes}".strip()
+                combined_input = f"{analysis_symptoms} {analysis_notes}".strip()
                 is_valid, validation_msg = self.validate_diagnosis_pattern(primary_dx, combined_input)
                 
                 if not is_valid:
@@ -864,6 +987,43 @@ Constraints:
                     # Reduce confidence if pattern doesn't match
                     parsed['confidence_score'] = min(parsed['confidence_score'], 0.40)
                     parsed['interpretation'] = f"Low confidence - {validation_msg}"
+
+                    top_candidate = next(
+                        (
+                            cand for cand in hypotheses.get('candidates', [])
+                            if isinstance(cand, dict) and cand.get('term')
+                        ),
+                        None,
+                    )
+                    if top_candidate and not self._diagnoses_match(primary_dx, top_candidate.get('term', '')):
+                        promoted_term = str(top_candidate.get('term', '')).strip()
+                        try:
+                            heuristic_score = float(top_candidate.get('score', 0.5))
+                        except (TypeError, ValueError):
+                            heuristic_score = 0.5
+                        promoted_score = max(
+                            parsed['confidence_score'],
+                            min(heuristic_score, 0.88),
+                        )
+                        if promoted_term:
+                            remaining = [
+                                diag for diag in parsed['diagnoses']
+                                if not self._diagnoses_match(diag.get('term', ''), promoted_term)
+                            ]
+                            parsed['diagnoses'] = [{'term': promoted_term, 'score': promoted_score}] + remaining[:5]
+
+            # Step 5b: Calibrate psychiatric risk cases with explicit suicidality
+            if parsed.get('diagnoses'):
+                primary_dx = str(parsed['diagnoses'][0].get('term', '')).lower()
+                combined_case = f"{analysis_symptoms} {analysis_notes}".lower()
+                if 'depress' in primary_dx or 'major depressive' in primary_dx:
+                    depression_feature_count = self._count_depression_features(combined_case)
+                    has_suicidality = self._has_suicidality(combined_case)
+                    if has_suicidality and depression_feature_count >= 5:
+                        parsed['confidence_score'] = max(parsed['confidence_score'], 0.78)
+                        parsed['interpretation'] = (
+                            'Moderate-high confidence - severe depressive episode with suicide risk; urgent psychiatric care required'
+                        )
             
             # Step 6: Normalize medications and apply fallback if safe
             parsed['medications'] = self._normalize_medications(parsed.get('medications', []))
@@ -909,6 +1069,35 @@ Constraints:
             import traceback
             traceback.print_exc()
             return self._build_error_response(str(e))
+
+    def _has_suicidality(self, text: str) -> bool:
+        markers = [
+            'suicidal ideation',
+            'suicidal thoughts',
+            'thoughts of death',
+            'recurrent thoughts of death',
+            'self harm',
+            'self-harm',
+            'wants to die',
+        ]
+        return any(self._is_present_and_not_negated(marker, text) for marker in markers)
+
+    def _count_depression_features(self, text: str) -> int:
+        feature_groups = [
+            ['depressed mood', 'persistent depressed mood', 'low mood', 'sad mood'],
+            ['anhedonia', 'diminished interest', 'loss of interest', 'loss of pleasure'],
+            ['weight loss', 'unintentional weight loss', 'appetite loss'],
+            ['insomnia', 'early morning awakening', 'sleep disturbance'],
+            ['psychomotor retardation', 'slowed speech', 'slowed movements', 'psychomotor slowing'],
+            ['fatigue', 'loss of energy', 'exhaustion'],
+            ['worthlessness', 'excessive guilt', 'guilt'],
+            ['difficulty concentrating', 'indecisiveness', 'poor concentration'],
+        ]
+        score = 0
+        for group in feature_groups:
+            if any(self._is_present_and_not_negated(marker, text) for marker in group):
+                score += 1
+        return score
     
     def _build_red_flag_context(self, red_flag_analysis: Dict) -> str:
         """Build context for LLM about detected red flags"""
@@ -1149,6 +1338,53 @@ Keep output concise, clinically actionable, and doctor-readable."""
                 break
         return recommendations
 
+    def _looks_like_dosage(self, text: str) -> bool:
+        value = str(text or '').strip().lower()
+        if not value:
+            return False
+
+        dosage_pattern = r'\b\d+(?:\.\d+)?\s*(?:mg|mcg|g|ml|iu|units?|puffs?|tabs?|tablets?|capsules?|drops?)\b'
+        route_or_form_pattern = r'\b(?:po|iv|im|sc|sq|inh|inhaled|topical|oral)\b'
+        if re.search(dosage_pattern, value):
+            return True
+        if re.search(route_or_form_pattern, value) and re.search(r'\d', value):
+            return True
+        return False
+
+    def _looks_like_frequency(self, text: str) -> bool:
+        value = str(text or '').strip().lower()
+        if not value:
+            return False
+
+        frequency_pattern = (
+            r'\b(?:every|q\d+h|once|twice|three times|daily|weekly|hourly|prn|bid|tid|qid|'
+            r'morning|night|bedtime|before|after)\b'
+        )
+        day_schedule_pattern = r'\bday\s*\d+\b|^\d+(?:\s*,\s*\d+)+$'
+        if re.search(frequency_pattern, value):
+            return True
+        if re.search(day_schedule_pattern, value):
+            return True
+        return False
+
+    def _normalize_medication_fields(self, dosage: str, frequency: str, duration: str, instructions: str) -> Tuple[str, str, str, str]:
+        dosage_value = str(dosage or '').strip()
+        frequency_value = str(frequency or '').strip()
+        duration_value = str(duration or '').strip()
+        instructions_value = str(instructions or '').strip()
+
+        dosage_is_frequency = self._looks_like_frequency(dosage_value) and not self._looks_like_dosage(dosage_value)
+        frequency_is_dosage = self._looks_like_dosage(frequency_value) and not self._looks_like_frequency(frequency_value)
+        if dosage_is_frequency and frequency_is_dosage:
+            dosage_value, frequency_value = frequency_value, dosage_value
+
+        if duration_value and not re.search(r'\b(?:day|days|week|weeks|month|months|year|years|as needed|prn)\b', duration_value.lower()):
+            if len(duration_value.split()) >= 6:
+                instructions_value = f"{instructions_value}; {duration_value}".strip('; ').strip()
+                duration_value = 'Per clinical protocol'
+
+        return dosage_value, frequency_value, duration_value, instructions_value
+
     def _normalize_medications(self, medications: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         """Normalize medication payload to backend serializer-compatible fields"""
         normalized = []
@@ -1181,12 +1417,20 @@ Keep output concise, clinically actionable, and doctor-readable."""
             if monitoring:
                 instruction_parts.append(f"Safety: {monitoring}")
 
+            normalized_instructions = '; '.join(instruction_parts)
+            dosage, frequency, duration, normalized_instructions = self._normalize_medication_fields(
+                dosage,
+                frequency,
+                duration,
+                normalized_instructions,
+            )
+
             normalized.append({
                 'medication_name': name,
                 'dosage': dosage,
                 'frequency': frequency,
                 'duration': duration,
-                'instructions': '; '.join(instruction_parts),
+                'instructions': normalized_instructions,
             })
 
             if len(normalized) >= 5:
@@ -1207,6 +1451,8 @@ Keep output concise, clinically actionable, and doctor-readable."""
             'gastroesophageal reflux disease': 'gerd',
             'allergic rhinitis': 'allergic rhinitis',
             'community acquired pneumonia': 'pneumonia',
+            'influenza-like illness': 'influenza-like illness',
+            'viral upper respiratory infection': 'viral upper respiratory infection',
         }
 
         protocol_key = ''
@@ -1299,8 +1545,11 @@ Keep output concise, clinically actionable, and doctor-readable."""
         medical_keywords = {
             'fever': 'Fever',
             'febrile': 'Fever',
+            'lagnat': 'Fever',
             'cough': 'Cough',
             'coughing': 'Cough',
+            'ubo': 'Cough',
+            'inuubo': 'Cough',
             'hemoptysis': 'Hemoptysis',
             'coughing blood': 'Hemoptysis',
             'coughing up blood': 'Hemoptysis',
@@ -1326,12 +1575,18 @@ Keep output concise, clinically actionable, and doctor-readable."""
             'watery stools': 'Diarrhea',
             'headache': 'Headache',
             'head pain': 'Headache',
+            'masakit ulo': 'Headache',
             'dizziness': 'Dizziness',
             'dizzy': 'Dizziness',
             'lightheaded': 'Dizziness',
             'abdominal pain': 'Abdominal Pain',
             'stomach pain': 'Abdominal Pain',
             'belly pain': 'Abdominal Pain',
+            'runny nose': 'Runny Nose',
+            'rhinorrhea': 'Runny Nose',
+            'nasal congestion': 'Nasal Congestion',
+            'stuffy nose': 'Nasal Congestion',
+            'sipon': 'Runny Nose',
             'nose bleed': 'Epistaxis',
             'nosebleed': 'Epistaxis',
             'nose bleeding': 'Epistaxis',
@@ -1360,6 +1615,31 @@ Keep output concise, clinically actionable, and doctor-readable."""
             'skin rash': 'Rash',
             'joint pain': 'Joint Pain',
             'arthralgia': 'Joint Pain',
+            'body aches': 'Body Aches',
+            'myalgia': 'Body Aches',
+            'muscle pain': 'Body Aches',
+            'sakit ng katawan': 'Body Aches',
+            'pananakit ng katawan': 'Body Aches',
+            'depressed mood': 'Depressed Mood',
+            'persistent depressed mood': 'Depressed Mood',
+            'low mood': 'Depressed Mood',
+            'anhedonia': 'Anhedonia',
+            'diminished interest': 'Anhedonia',
+            'loss of interest': 'Anhedonia',
+            'insomnia': 'Insomnia',
+            'early morning awakening': 'Insomnia',
+            'psychomotor retardation': 'Psychomotor Retardation',
+            'slowed speech': 'Psychomotor Retardation',
+            'slowed movements': 'Psychomotor Retardation',
+            'worthlessness': 'Worthlessness',
+            'excessive guilt': 'Excessive Guilt',
+            'difficulty concentrating': 'Poor Concentration',
+            'indecisiveness': 'Poor Concentration',
+            'suicidal ideation': 'Suicidal Ideation',
+            'suicidal thoughts': 'Suicidal Ideation',
+            'thoughts of death': 'Suicidal Ideation',
+            'self harm': 'Suicidal Ideation',
+            'self-harm': 'Suicidal Ideation',
             'chills': 'Chills',
             'hypertension': 'Hypertension',
             'high blood pressure': 'Hypertension',

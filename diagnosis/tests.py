@@ -1,6 +1,7 @@
 from django.contrib.auth.models import User
 from rest_framework import status
 from rest_framework.test import APITestCase
+from unittest.mock import patch
 
 from .models import Diagnosis, Medication
 
@@ -145,3 +146,102 @@ class DiagnosisMedicationIntegrationTests(APITestCase):
         self.assertFalse(
             diagnosis.medications.filter(medication_name='Prednisone').exists()
         )
+
+    def test_structured_schedule_fields_are_saved_and_frequency_is_generated(self):
+        payload = {
+            'doctor': self.user.id,
+            'patient_name': 'Schedule Test',
+            'patient_id': 'P-3003',
+            'symptoms': 'Cough and fever',
+            'clinical_notes': 'Outpatient follow-up.',
+            'diagnosis_text': 'Viral URI',
+            'status': 'pending',
+            'medications': [
+                {
+                    'medication_name': 'Cetirizine',
+                    'dosage': '10 mg',
+                    'frequency': '',
+                    'schedule_type': 'specific_times',
+                    'take_with_lunch': True,
+                    'take_bedtime': True,
+                    'duration': '5 days',
+                    'instructions': 'Take after meals if tolerated',
+                }
+            ],
+        }
+
+        response = self.client.post('/api/diagnoses/', payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        medication = Medication.objects.get(medication_name='Cetirizine')
+        self.assertEqual(medication.schedule_type, 'specific_times')
+        self.assertTrue(medication.take_with_lunch)
+        self.assertTrue(medication.take_bedtime)
+        self.assertIn('lunch', medication.frequency.lower())
+        self.assertIn('bedtime', medication.frequency.lower())
+
+
+class HybridAnalysisEndpointTests(APITestCase):
+    @patch('diagnosis.views.hybrid_orchestrator.analyze')
+    def test_analyze_symptoms_returns_compatibility_payload(self, mock_analyze):
+        mock_analyze.return_value = {
+            'result': {'primary_diagnosis': 'Pneumonia'},
+            'ai_analysis': {
+                'confidence_score': 0.81,
+                'suggested_diagnoses': [{'term': 'Pneumonia', 'score': 0.81}],
+                'keywords': ['Fever', 'Cough'],
+                'interpretation': 'Validated by secondary safety layer',
+                'clinical_reasoning': 'PRIMARY DIAGNOSIS: Pneumonia',
+                'summary': 'Likely community acquired pneumonia',
+                'recommendations': ['Chest X-ray'],
+                'medications': [],
+                'red_flag_analysis': {
+                    'has_red_flags': False,
+                    'urgency_level': 'LOW',
+                    'detected_flags': [],
+                },
+            },
+            'meta': {'validator_invoked': True},
+        }
+
+        response = self.client.post(
+            '/api/diagnoses/analyze_symptoms/',
+            {'symptoms': 'Fever and productive cough', 'clinical_notes': 'Crackles on exam'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['suggested_diagnoses'][0]['term'], 'Pneumonia')
+        self.assertEqual(response.data['confidence_score'], 0.81)
+
+    @patch('diagnosis.views.hybrid_orchestrator.stream_analysis')
+    def test_analyze_stream_returns_sse_events(self, mock_stream_analysis):
+        mock_stream_analysis.return_value = iter(
+            [
+                {'event': 'status', 'data': {'stage': 'intake', 'message': 'Analyzing symptoms...'}},
+                {'event': 'token', 'data': {'stage': 'response', 'text': 'PRIMARY '}},
+                {'event': 'token', 'data': {'stage': 'response', 'text': 'DIAGNOSIS '}},
+                {
+                    'event': 'done',
+                    'data': {
+                        'result': {'primary_diagnosis': 'Pneumonia'},
+                        'ai_analysis': {'confidence_score': 0.8},
+                        'meta': {'validator_invoked': True},
+                    },
+                },
+            ]
+        )
+
+        response = self.client.post(
+            '/api/diagnoses/analyze_stream/',
+            {'symptoms': 'Fever and productive cough', 'clinical_notes': 'Crackles on exam'},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response['Content-Type'], 'text/event-stream')
+
+        stream_payload = b''.join(response.streaming_content).decode('utf-8')
+        self.assertIn('event: status', stream_payload)
+        self.assertIn('event: token', stream_payload)
+        self.assertIn('event: done', stream_payload)

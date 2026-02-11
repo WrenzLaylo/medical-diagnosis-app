@@ -1,6 +1,13 @@
 import React, { useState } from 'react';
 import { diagnosisAPI } from '../services/api';
 import { formatAIOutput, safeNumber, formatPercentage, getConfidenceGradient } from '../utils/formatUtils';
+import {
+  defaultMedicationSchedule,
+  inferScheduleFromFrequency,
+  buildFrequencyFromSchedule,
+  isScheduleComplete,
+  MedicationScheduleFields,
+} from '../utils/medicationSchedule';
 
 interface Diagnosis {
   id: number;
@@ -38,6 +45,16 @@ interface Diagnosis {
     medication_name: string;
     dosage: string;
     frequency: string;
+    schedule_type?: MedicationScheduleFields['schedule_type'];
+    every_hours?: number | null;
+    times_per_day?: number | null;
+    take_morning?: boolean;
+    take_noon?: boolean;
+    take_evening?: boolean;
+    take_bedtime?: boolean;
+    take_with_breakfast?: boolean;
+    take_with_lunch?: boolean;
+    take_with_dinner?: boolean;
     duration: string;
     instructions?: string;
   }>;
@@ -54,6 +71,16 @@ type EditableMedication = {
   medication_name: string;
   dosage: string;
   frequency: string;
+  schedule_type: MedicationScheduleFields['schedule_type'];
+  every_hours: number | null;
+  times_per_day: number | null;
+  take_morning: boolean;
+  take_noon: boolean;
+  take_evening: boolean;
+  take_bedtime: boolean;
+  take_with_breakfast: boolean;
+  take_with_lunch: boolean;
+  take_with_dinner: boolean;
   duration: string;
   instructions: string;
 };
@@ -63,19 +90,37 @@ const createEditableMedication = (): EditableMedication => ({
   medication_name: '',
   dosage: '',
   frequency: '',
+  ...defaultMedicationSchedule(),
   duration: '',
   instructions: '',
 });
 
-const mapDiagnosisMedication = (med: NonNullable<Diagnosis['medications']>[number]): EditableMedication => ({
-  id: med.id,
-  local_id: med.id || Date.now() + Math.floor(Math.random() * 1000),
-  medication_name: med.medication_name,
-  dosage: med.dosage,
-  frequency: med.frequency,
-  duration: med.duration,
-  instructions: med.instructions || '',
-});
+const mapDiagnosisMedication = (med: NonNullable<Diagnosis['medications']>[number]): EditableMedication => {
+  const inferred = inferScheduleFromFrequency(med.frequency || '');
+  const schedule = {
+    schedule_type: med.schedule_type || inferred.schedule_type,
+    every_hours: typeof med.every_hours === 'number' ? med.every_hours : inferred.every_hours,
+    times_per_day: typeof med.times_per_day === 'number' ? med.times_per_day : inferred.times_per_day,
+    take_morning: Boolean(med.take_morning ?? inferred.take_morning),
+    take_noon: Boolean(med.take_noon ?? inferred.take_noon),
+    take_evening: Boolean(med.take_evening ?? inferred.take_evening),
+    take_bedtime: Boolean(med.take_bedtime ?? inferred.take_bedtime),
+    take_with_breakfast: Boolean(med.take_with_breakfast ?? inferred.take_with_breakfast),
+    take_with_lunch: Boolean(med.take_with_lunch ?? inferred.take_with_lunch),
+    take_with_dinner: Boolean(med.take_with_dinner ?? inferred.take_with_dinner),
+  };
+
+  return {
+    id: med.id,
+    local_id: med.id || Date.now() + Math.floor(Math.random() * 1000),
+    medication_name: med.medication_name,
+    dosage: med.dosage,
+    frequency: buildFrequencyFromSchedule(schedule, med.frequency || ''),
+    ...schedule,
+    duration: med.duration,
+    instructions: med.instructions || '',
+  };
+};
 
 const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose }) => {
   const initialState = {
@@ -90,7 +135,7 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
   const handleMedicationFieldChange = (
     localId: number,
     field: keyof Omit<EditableMedication, 'id' | 'local_id'>,
-    value: string
+    value: EditableMedication[keyof Omit<EditableMedication, 'id' | 'local_id'>]
   ) => {
     setEditedDiagnosis((prev) => ({
       ...prev,
@@ -121,21 +166,57 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
 
   const handleEdit = async () => {
     const medicationsPayload = editedDiagnosis.medications
-      .map((med) => ({
+      .map((med) => {
+        const schedule = {
+          schedule_type: med.schedule_type,
+          every_hours: med.every_hours ? Number(med.every_hours) : null,
+          times_per_day: med.times_per_day ? Number(med.times_per_day) : null,
+          take_morning: med.take_morning,
+          take_noon: med.take_noon,
+          take_evening: med.take_evening,
+          take_bedtime: med.take_bedtime,
+          take_with_breakfast: med.take_with_breakfast,
+          take_with_lunch: med.take_with_lunch,
+          take_with_dinner: med.take_with_dinner,
+        };
+
+        return {
         id: med.id,
         medication_name: med.medication_name.trim(),
         dosage: med.dosage.trim(),
-        frequency: med.frequency.trim(),
+        frequency: buildFrequencyFromSchedule(schedule, med.frequency.trim()),
+        ...schedule,
         duration: med.duration.trim(),
         instructions: med.instructions.trim(),
-      }))
-      .filter((med) => med.medication_name || med.dosage || med.frequency || med.duration || med.instructions);
+        };
+      })
+      .filter(
+        (med) => med.medication_name || med.dosage || med.frequency || med.duration || med.instructions
+      );
 
     const hasIncompleteMedication = medicationsPayload.some(
-      (med) => !med.medication_name || !med.dosage || !med.frequency || !med.duration
+      (med) =>
+        !med.medication_name ||
+        !med.dosage ||
+        !med.duration ||
+        !isScheduleComplete(
+          {
+            schedule_type: med.schedule_type,
+            every_hours: med.every_hours,
+            times_per_day: med.times_per_day,
+            take_morning: med.take_morning,
+            take_noon: med.take_noon,
+            take_evening: med.take_evening,
+            take_bedtime: med.take_bedtime,
+            take_with_breakfast: med.take_with_breakfast,
+            take_with_lunch: med.take_with_lunch,
+            take_with_dinner: med.take_with_dinner,
+          },
+          med.frequency
+        )
     );
     if (hasIncompleteMedication) {
-      alert('Each medication must include name, dosage, frequency, and duration.');
+      alert('Each medication must include name, dosage, duration, and a valid schedule (frequency text or structured timing).');
       return;
     }
 
@@ -443,13 +524,13 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
                         />
                       </div>
                       <div>
-                        <label className="label">Frequency *</label>
+                        <label className="label">Frequency (summary)</label>
                         <input
                           type="text"
                           value={med.frequency}
                           onChange={(e) => handleMedicationFieldChange(med.local_id, 'frequency', e.target.value)}
                           className="input-field"
-                          placeholder="e.g. PO every 8 hours"
+                          placeholder="e.g. Every 8 hours"
                         />
                       </div>
                       <div>
@@ -463,6 +544,145 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
                         />
                       </div>
                     </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div>
+                        <label className="label">Schedule Type *</label>
+                        <select
+                          value={med.schedule_type}
+                          onChange={(e) => {
+                            const nextType = e.target.value as EditableMedication['schedule_type'];
+                            handleMedicationFieldChange(med.local_id, 'schedule_type', nextType);
+                            if (nextType !== 'per_hour') handleMedicationFieldChange(med.local_id, 'every_hours', null);
+                            if (nextType !== 'per_day') handleMedicationFieldChange(med.local_id, 'times_per_day', null);
+                          }}
+                          className="input-field"
+                        >
+                          <option value="free_text">Free text frequency</option>
+                          <option value="per_hour">Every X hours</option>
+                          <option value="per_day">X times per day</option>
+                          <option value="specific_times">Specific times</option>
+                        </select>
+                      </div>
+
+                      {med.schedule_type === 'per_hour' && (
+                        <div>
+                          <label className="label">Every (hours) *</label>
+                          <input
+                            type="number"
+                            min={1}
+                            value={med.every_hours ?? ''}
+                            onChange={(e) =>
+                              handleMedicationFieldChange(
+                                med.local_id,
+                                'every_hours',
+                                e.target.value ? Number(e.target.value) : null
+                              )
+                            }
+                            className="input-field"
+                            placeholder="e.g. 8"
+                          />
+                        </div>
+                      )}
+
+                      {med.schedule_type === 'per_day' && (
+                        <div>
+                          <label className="label">Times per day *</label>
+                          <input
+                            type="number"
+                            min={1}
+                            value={med.times_per_day ?? ''}
+                            onChange={(e) =>
+                              handleMedicationFieldChange(
+                                med.local_id,
+                                'times_per_day',
+                                e.target.value ? Number(e.target.value) : null
+                              )
+                            }
+                            className="input-field"
+                            placeholder="e.g. 2"
+                          />
+                        </div>
+                      )}
+                    </div>
+
+                    {med.schedule_type === 'specific_times' && (
+                      <div className="border border-gray-200 rounded p-3 bg-white">
+                        <p className="text-xs font-medium text-gray-700 mb-2">Select administration times *</p>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                          <label className="text-xs text-gray-700 flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={med.take_morning}
+                              onChange={(e) => handleMedicationFieldChange(med.local_id, 'take_morning', e.target.checked)}
+                            />
+                            Morning
+                          </label>
+                          <label className="text-xs text-gray-700 flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={med.take_noon}
+                              onChange={(e) => handleMedicationFieldChange(med.local_id, 'take_noon', e.target.checked)}
+                            />
+                            Noon
+                          </label>
+                          <label className="text-xs text-gray-700 flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={med.take_evening}
+                              onChange={(e) =>
+                                handleMedicationFieldChange(med.local_id, 'take_evening', e.target.checked)
+                              }
+                            />
+                            Evening
+                          </label>
+                          <label className="text-xs text-gray-700 flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={med.take_bedtime}
+                              onChange={(e) =>
+                                handleMedicationFieldChange(med.local_id, 'take_bedtime', e.target.checked)
+                              }
+                            />
+                            Bedtime
+                          </label>
+                          <label className="text-xs text-gray-700 flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={med.take_with_breakfast}
+                              onChange={(e) =>
+                                handleMedicationFieldChange(
+                                  med.local_id,
+                                  'take_with_breakfast',
+                                  e.target.checked
+                                )
+                              }
+                            />
+                            With breakfast
+                          </label>
+                          <label className="text-xs text-gray-700 flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={med.take_with_lunch}
+                              onChange={(e) =>
+                                handleMedicationFieldChange(med.local_id, 'take_with_lunch', e.target.checked)
+                              }
+                            />
+                            With lunch
+                          </label>
+                          <label className="text-xs text-gray-700 flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={med.take_with_dinner}
+                              onChange={(e) =>
+                                handleMedicationFieldChange(med.local_id, 'take_with_dinner', e.target.checked)
+                              }
+                            />
+                            With dinner
+                          </label>
+                        </div>
+                      </div>
+                    )}
 
                     <div>
                       <label className="label">Instructions</label>

@@ -1,12 +1,29 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.renderers import BaseRenderer
+from django.http import StreamingHttpResponse
 from django.utils import timezone
 from django.contrib.auth.models import User
 from .models import Diagnosis, Medication
 from .serializers import DiagnosisSerializer, MedicationSerializer
-from .ml_models.med42_service import med42_service
+from .services.hybrid_orchestrator import hybrid_orchestrator
+import json
 import traceback
+
+
+class ServerSentEventRenderer(BaseRenderer):
+    media_type = 'text/event-stream'
+    format = 'event-stream'
+    charset = 'utf-8'
+    render_style = 'text'
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        if data is None:
+            return b''
+        if isinstance(data, (bytes, bytearray)):
+            return bytes(data)
+        return str(data).encode(self.charset)
 
 
 class DiagnosisViewSet(viewsets.ModelViewSet):
@@ -29,8 +46,8 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def analyze_symptoms(self, request):
         """
-        Use Med42-v3 to analyze symptoms and suggest medications
-        Returns: AI analysis with diagnoses, confidence, reasoning, and medication suggestions
+        Analyze symptoms through hybrid pipeline (Med42 + optional watsonx validation)
+        Returns frontend-compatible AI analysis payload
         """
         symptoms = request.data.get('symptoms', '')
         clinical_notes = request.data.get('clinical_notes', '')
@@ -42,14 +59,9 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
             )
         
         try:
-            # Use Med42-v3 for comprehensive analysis
-            analysis = med42_service.analyze_symptoms(symptoms, clinical_notes)
-            
-            # Check for errors
-            if 'error' in analysis and analysis['error']:
-                return Response(analysis, status=status.HTTP_200_OK)
-            
-            return Response(analysis, status=status.HTTP_200_OK)
+            payload = hybrid_orchestrator.analyze(symptoms, clinical_notes)
+            ai_analysis = payload.get('ai_analysis', {})
+            return Response(ai_analysis, status=status.HTTP_200_OK)
             
         except Exception as e:
             print(f"Error in analyze_symptoms: {e}")
@@ -66,6 +78,63 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    @action(detail=False, methods=['post'], renderer_classes=[ServerSentEventRenderer])
+    def analyze_stream(self, request):
+        """
+        Stream hybrid analysis via Server-Sent Events (SSE).
+        Event types: status, token, validation, done, error
+        """
+        symptoms = request.data.get('symptoms', '')
+        clinical_notes = request.data.get('clinical_notes', '')
+
+        if not symptoms:
+            return Response(
+                {'error': 'Symptoms are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        def format_sse(event_name, data):
+            return f"event: {event_name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+        def event_stream():
+            try:
+                for event in hybrid_orchestrator.stream_analysis(
+                    symptoms=symptoms,
+                    clinical_notes=clinical_notes,
+                    include_tokens=True,
+                ):
+                    yield format_sse(event.get('event', 'status'), event.get('data', {}))
+            except Exception as exc:
+                yield format_sse('error', {'message': f'Analysis failed: {exc}'})
+                yield format_sse(
+                    'done',
+                    {
+                        'result': {},
+                        'ai_analysis': {
+                            'error': f'Analysis failed: {exc}',
+                            'confidence_score': 0.0,
+                            'suggested_diagnoses': [],
+                            'keywords': [],
+                            'interpretation': 'Analysis failed',
+                            'clinical_reasoning': '',
+                            'summary': '',
+                            'recommendations': [],
+                            'medications': [],
+                            'red_flag_analysis': {
+                                'has_red_flags': False,
+                                'urgency_level': 'UNKNOWN',
+                                'detected_flags': [],
+                            },
+                        },
+                        'meta': {'cache_hit': False, 'validator_invoked': False},
+                    }
+                )
+
+        response = StreamingHttpResponse(event_stream(), content_type='text/event-stream')
+        response['Cache-Control'] = 'no-cache'
+        response['X-Accel-Buffering'] = 'no'
+        return response
     
     def create(self, request, *args, **kwargs):
         """Create diagnosis with enhanced error handling and automatic doctor assignment"""

@@ -31,10 +31,27 @@ class Diagnosis(models.Model):
 
 
 class Medication(models.Model):
+    SCHEDULE_TYPE_CHOICES = [
+        ('free_text', 'Free Text'),
+        ('per_hour', 'Per Hour'),
+        ('per_day', 'Per Day'),
+        ('specific_times', 'Specific Times'),
+    ]
+
     diagnosis = models.ForeignKey(Diagnosis, on_delete=models.CASCADE, related_name='medications')
     medication_name = models.CharField(max_length=200)
     dosage = models.CharField(max_length=100)
     frequency = models.CharField(max_length=100)
+    schedule_type = models.CharField(max_length=20, choices=SCHEDULE_TYPE_CHOICES, default='free_text')
+    every_hours = models.PositiveSmallIntegerField(null=True, blank=True)
+    times_per_day = models.PositiveSmallIntegerField(null=True, blank=True)
+    take_morning = models.BooleanField(default=False)
+    take_noon = models.BooleanField(default=False)
+    take_evening = models.BooleanField(default=False)
+    take_bedtime = models.BooleanField(default=False)
+    take_with_breakfast = models.BooleanField(default=False)
+    take_with_lunch = models.BooleanField(default=False)
+    take_with_dinner = models.BooleanField(default=False)
     duration = models.CharField(max_length=100)
     instructions = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

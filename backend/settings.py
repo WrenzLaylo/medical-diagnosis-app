@@ -119,6 +119,12 @@ STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# Hybrid AI runtime config (read from environment)
+HF_TOKEN = os.environ.get('HF_TOKEN', '')
+WATSONX_API_KEY = os.environ.get('WATSONX_API_KEY', '')
+WATSONX_PROJECT_ID = os.environ.get('WATSONX_PROJECT_ID', '')
+WATSONX_URL = os.environ.get('WATSONX_URL', '')
+
 # CORS settings
 if DEBUG:
     CORS_ALLOW_ALL_ORIGINS = True
