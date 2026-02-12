@@ -224,6 +224,12 @@ Constraints:
                 'may_have': ['wheezing', 'barrel_chest', 'weight_loss'],
                 'should_not_have': ['acute_onset_only']
             },
+            'acute_copd_exacerbation': {
+                'required': ['dyspnea', 'cough'],
+                'typical': ['sputum_production', 'wheezing', 'hypoxemia'],
+                'may_have': ['fever', 'crackles', 'fatigue'],
+                'should_not_have': []
+            },
             'gerd': {
                 'required': ['heartburn', 'regurgitation'],
                 'typical': ['chest_discomfort', 'dysphagia', 'worse_lying_down'],
@@ -271,6 +277,24 @@ Constraints:
                 'typical': ['polyuria', 'polydipsia', 'polyphagia'],
                 'may_have': ['weight_loss', 'fatigue', 'blurred_vision'],
                 'labs_required': ['elevated glucose or HbA1c']
+            },
+            'uncontrolled_type_2_diabetes_mellitus': {
+                'required': ['hyperglycemia'],
+                'typical': ['polyuria', 'polydipsia', 'elevated_hba1c'],
+                'may_have': ['fatigue', 'poor_medication_adherence'],
+                'should_not_have': []
+            },
+            'hypertension_with_renal_impairment': {
+                'required': ['hypertension'],
+                'typical': ['renal_impairment', 'elevated_creatinine', 'reduced_egfr'],
+                'may_have': ['diabetes', 'palpitations', 'dyspnea_on_exertion'],
+                'should_not_have': []
+            },
+            'acute_gout_flare': {
+                'required': ['acute_joint_pain'],
+                'typical': ['great_toe_pain', 'mcp1_swelling', 'erythema', 'hyperuricemia'],
+                'may_have': ['joint_tenderness', 'warm_joint', 'fatigue'],
+                'should_not_have': []
             },
             'uti': {
                 'required': ['dysuria'],
@@ -372,6 +396,29 @@ Constraints:
                     'instructions': 'Symptom relief; assess oxygenation and exacerbation severity.'
                 }
             ],
+            'acute copd exacerbation': [
+                {
+                    'medication_name': 'Albuterol + Ipratropium',
+                    'dosage': '2.5 mg/0.5 mg nebulized',
+                    'frequency': 'Every 4-6 hours',
+                    'duration': '3-5 days',
+                    'instructions': 'Short-acting bronchodilator combination for acute airflow limitation.'
+                },
+                {
+                    'medication_name': 'Prednisone',
+                    'dosage': '40 mg',
+                    'frequency': 'PO once daily',
+                    'duration': '5 days',
+                    'instructions': 'Short oral steroid burst if no contraindication; monitor glucose closely in diabetes.'
+                },
+                {
+                    'medication_name': 'Acetaminophen',
+                    'dosage': '500 mg',
+                    'frequency': 'PO every 6-8 hours PRN',
+                    'duration': 'Up to 3 days',
+                    'instructions': 'Use for fever/pain when NSAIDs are not preferred or contraindicated.'
+                },
+            ],
             'gerd': [
                 {
                     'medication_name': 'Omeprazole',
@@ -433,9 +480,13 @@ Constraints:
             'ibs': 'Irritable bowel syndrome',
             'gerd': 'Gastroesophageal reflux disease',
             'copd': 'COPD',
+            'acute_copd_exacerbation': 'Acute COPD exacerbation',
             'influenza_like_illness': 'Influenza-like illness',
             'viral_upper_respiratory_infection': 'Viral upper respiratory infection',
             'major_depressive_episode': 'Major depressive episode',
+            'uncontrolled_type_2_diabetes_mellitus': 'Uncontrolled type 2 diabetes mellitus',
+            'hypertension_with_renal_impairment': 'Hypertension with renal impairment',
+            'acute_gout_flare': 'Acute gout flare',
             'mccune_albright_syndrome': 'McCune-Albright syndrome',
             'peripheral_precocious_puberty': 'Peripheral precocious puberty',
             'central_precocious_puberty': 'Central precocious puberty',
@@ -453,8 +504,15 @@ Constraints:
         normalized = normalized.replace('pulmonary tuberculosis', 'pulmonary tb')
         normalized = normalized.replace('mccune albright', 'mccune albright syndrome')
         normalized = normalized.replace('mccune-albright', 'mccune albright syndrome')
+        normalized = normalized.replace('type ii diabetes', 'type 2 diabetes')
+        normalized = normalized.replace('t2dm', 'type 2 diabetes')
+        normalized = normalized.replace('ckd', 'chronic kidney disease')
+        normalized = normalized.replace('renal dysfunction', 'renal impairment')
+        normalized = normalized.replace('acute exacerbation of copd', 'acute copd exacerbation')
+        normalized = normalized.replace('aecopd', 'acute copd exacerbation')
         normalized = normalized.replace('nf1', 'neurofibromatosis type 1')
         normalized = normalized.replace('familial adenomatous polyposis', 'fap')
+        normalized = normalized.replace('podagra', 'gout')
         normalized = re.sub(r'[^a-z0-9\s]', ' ', normalized)
         normalized = re.sub(r'\s+', ' ', normalized).strip()
         return normalized
@@ -736,6 +794,390 @@ Constraints:
         else:
             parsed['summary'] = focused_summary
 
+    def _contains_any_marker(self, text: str, markers: List[str]) -> bool:
+        for marker in markers:
+            if self._is_present_and_not_negated(marker, text):
+                return True
+        return False
+
+    def _extract_numeric_value(self, text: str, patterns: List[str]) -> float:
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            try:
+                return float(match.group(1))
+            except (TypeError, ValueError):
+                continue
+        return -1.0
+
+    def _detect_multimorbidity_conditions(self, symptoms_text: str, clinical_notes: str) -> List[Dict[str, Any]]:
+        combined = f"{symptoms_text} {clinical_notes}".lower().strip()
+        if not combined:
+            return []
+
+        conditions: List[Dict[str, Any]] = []
+
+        # Acute COPD exacerbation should be treated as a high-priority active diagnosis.
+        has_copd_history = self._contains_any_marker(
+            combined,
+            ['copd', 'chronic obstructive pulmonary disease', 'chronic bronchitis', 'emphysema'],
+        )
+        has_dyspnea = self._contains_any_marker(
+            combined,
+            ['shortness of breath', 'dyspnea', 'difficulty breathing', 'breathlessness'],
+        )
+        has_cough = self._contains_any_marker(
+            combined,
+            ['cough', 'productive cough', 'sputum', 'phlegm'],
+        )
+        has_wheeze_or_crackles = self._contains_any_marker(
+            combined,
+            ['wheezing', 'wheeze', 'crackles', 'rales'],
+        )
+        has_fever = self._contains_any_marker(combined, ['fever', 'febrile', 'temperature'])
+        spo2_value = self._extract_numeric_value(
+            combined,
+            [r'(?:spo2|oxygen saturation|o2 sat)\s*(?:of|=|:)?\s*(\d{2,3})'],
+        )
+        has_hypoxemia = 0 < spo2_value <= 92
+        if has_copd_history and has_dyspnea and (has_cough or has_wheeze_or_crackles):
+            evidence = ['known COPD']
+            if has_dyspnea:
+                evidence.append('worsening dyspnea')
+            if has_cough:
+                evidence.append('productive cough/sputum')
+            if has_wheeze_or_crackles:
+                evidence.append('wheezing/crackles on exam')
+            if has_fever:
+                evidence.append('febrile/inflammatory pattern')
+            if has_hypoxemia:
+                evidence.append(f'SpO2 {spo2_value:g}% on room air')
+            conditions.append(
+                {
+                    'term': 'Acute COPD exacerbation',
+                    'score': 0.94 if has_hypoxemia else 0.88,
+                    'evidence': evidence[:5],
+                }
+            )
+
+        # Uncontrolled type 2 diabetes mellitus.
+        glucose_value = self._extract_numeric_value(
+            combined,
+            [
+                r'(?:fasting\s+blood\s+glucose|blood\s+glucose|glucose|fbg)\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)',
+            ],
+        )
+        hba1c_value = self._extract_numeric_value(
+            combined,
+            [
+                r'(?:hba1c|a1c)\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)',
+            ],
+        )
+        has_dm_history = self._contains_any_marker(
+            combined,
+            ['type 2 diabetes', 't2dm', 'diabetes mellitus', 'diabetic'],
+        )
+        has_dm_symptoms = (
+            self._feature_present('polyuria', combined)
+            and self._feature_present('polydipsia', combined)
+        )
+        has_hyperglycemia = (
+            glucose_value >= 200
+            or hba1c_value >= 7.0
+            or self._feature_present('hyperglycemia', combined)
+        )
+        if has_hyperglycemia and (has_dm_history or has_dm_symptoms):
+            evidence = []
+            if has_dm_history:
+                evidence.append('known diabetes history')
+            if has_dm_symptoms:
+                evidence.append('polyuria/polydipsia')
+            if glucose_value >= 0:
+                evidence.append(f'glucose {glucose_value:g} mg/dL')
+            if hba1c_value >= 0:
+                evidence.append(f'HbA1c {hba1c_value:g}%')
+            if self._contains_any_marker(combined, ['poor adherence', 'nonadherence', 'missed medications']):
+                evidence.append('medication non-adherence')
+            conditions.append(
+                {
+                    'term': 'Uncontrolled type 2 diabetes mellitus',
+                    'score': 0.82 if hba1c_value >= 8.5 or glucose_value >= 220 else 0.74,
+                    'evidence': evidence[:4],
+                }
+            )
+
+        # Hypertension with renal impairment.
+        bp_match = re.search(r'\bbp\s*(?:of|=|:)?\s*(\d{2,3})\s*/\s*(\d{2,3})\b', combined, flags=re.IGNORECASE)
+        systolic = -1
+        diastolic = -1
+        if bp_match:
+            try:
+                systolic = int(bp_match.group(1))
+                diastolic = int(bp_match.group(2))
+            except (TypeError, ValueError):
+                systolic = -1
+                diastolic = -1
+        has_htn = self._contains_any_marker(combined, ['hypertension', 'high blood pressure']) or (
+            systolic >= 140 or diastolic >= 90
+        )
+        creatinine_value = self._extract_numeric_value(
+            combined,
+            [r'(?:serum\s+)?creatinine\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)'],
+        )
+        egfr_value = self._extract_numeric_value(
+            combined,
+            [r'(?:egfr|gfr)\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)'],
+        )
+        has_renal_impairment = (
+            creatinine_value >= 1.3
+            or (0 < egfr_value < 60)
+            or self._contains_any_marker(combined, ['renal impairment', 'chronic kidney disease', 'ckd'])
+        )
+        if has_htn and has_renal_impairment:
+            evidence = []
+            if systolic > 0 and diastolic > 0:
+                evidence.append(f'BP {systolic}/{diastolic}')
+            if creatinine_value >= 0:
+                evidence.append(f'creatinine {creatinine_value:g} mg/dL')
+            if egfr_value >= 0:
+                evidence.append(f'eGFR {egfr_value:g} mL/min/1.73m2')
+            evidence.append('hypertension with renal involvement')
+            conditions.append(
+                {
+                    'term': 'Hypertension with renal impairment',
+                    'score': 0.78 if systolic >= 160 or diastolic >= 100 else 0.72,
+                    'evidence': evidence[:4],
+                }
+            )
+
+        # Acute gout flare.
+        uric_value = self._extract_numeric_value(
+            combined,
+            [r'(?:serum\s+)?uric\s+acid\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)'],
+        )
+        has_joint_focus = self._contains_any_marker(
+            combined,
+            ['joint pain', 'acute joint pain', 'podagra', 'metatarsophalangeal', 'great toe pain'],
+        )
+        has_inflammatory_joint_signs = self._contains_any_marker(
+            combined,
+            ['swollen', 'erythematous', 'red', 'tender', 'extremely tender', 'warm joint'],
+        )
+        if has_joint_focus and (has_inflammatory_joint_signs or uric_value >= 7.0):
+            evidence = []
+            if self._contains_any_marker(combined, ['great toe', 'metatarsophalangeal', 'podagra']):
+                evidence.append('first MTP involvement')
+            if has_inflammatory_joint_signs:
+                evidence.append('swollen/erythematous/tender joint')
+            if uric_value >= 0:
+                evidence.append(f'uric acid {uric_value:g} mg/dL')
+            conditions.append(
+                {
+                    'term': 'Acute gout flare',
+                    'score': 0.86 if uric_value >= 8.0 else 0.78,
+                    'evidence': evidence[:4],
+                }
+            )
+
+        # Rhythm issue should remain in differential if explicitly documented.
+        if self._contains_any_marker(
+            combined,
+            ['irregular rhythm', 'premature atrial contractions', 'palpitations'],
+        ):
+            conditions.append(
+                {
+                    'term': 'Cardiac rhythm disturbance (premature atrial contractions)',
+                    'score': 0.56,
+                    'evidence': ['palpitations/irregular rhythm documented'],
+                }
+            )
+
+        if self._contains_any_marker(combined, ['ankle swelling', 'peripheral edema', 'pedal edema']):
+            conditions.append(
+                {
+                    'term': 'Peripheral edema (evaluate cardiorenal cause)',
+                    'score': 0.54,
+                    'evidence': ['ankle/peripheral edema documented'],
+                }
+            )
+
+        conditions.sort(key=lambda item: item.get('score', 0.0), reverse=True)
+        deduped: List[Dict[str, Any]] = []
+        seen = set()
+        for item in conditions:
+            key = self._canonical_diagnosis(item.get('term', ''))
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+            if len(deduped) >= 6:
+                break
+        return deduped
+
+    def _has_allergy(self, combined_text: str, markers: List[str]) -> bool:
+        return self._contains_any_marker(combined_text, markers)
+
+    def _build_parallel_management_guidance(self, active_terms: List[str], combined_text: str) -> Tuple[List[str], List[str]]:
+        lower_terms = [self._canonical_diagnosis(item) for item in active_terms]
+        has_copd = any('acute copd exacerbation' in item or item == 'copd' for item in lower_terms)
+        has_dm = any('type 2 diabetes' in item or 'uncontrolled' in item for item in lower_terms)
+        has_htn_renal = any('hypertension with renal impairment' in item for item in lower_terms)
+        has_gout = any('gout' in item for item in lower_terms)
+
+        has_acei_allergy = self._has_allergy(
+            combined_text,
+            ['ace inhibitor allergy', 'allergy to ace inhibitor', 'angioedema from ace', 'facial swelling from ace'],
+        )
+        has_penicillin_allergy = self._has_allergy(
+            combined_text,
+            ['penicillin allergy', 'allergy to penicillin', 'penicillin caused hives', 'penicillin caused swelling'],
+        )
+        has_nsaid_allergy = self._has_allergy(
+            combined_text,
+            ['nsaid allergy', 'allergy to nsaid', 'ibuprofen allergy', 'naproxen allergy'],
+        )
+
+        recommendations: List[str] = []
+        actions: List[str] = []
+
+        if has_copd:
+            recommendations.extend(
+                [
+                    'Treat acute COPD exacerbation first: short-acting bronchodilator regimen and oxygen titration (target SpO2 about 88-92%).',
+                    'Consider short-course systemic corticosteroid if no contraindication; monitor for steroid-induced hyperglycemia.',
+                    'If bacterial trigger is likely (purulent sputum/raised inflammatory markers), choose non-penicillin antibiotics when penicillin allergy is present.',
+                ]
+            )
+            actions.append('Escalate urgently if respiratory distress worsens, oxygen requirement rises, or mental status changes.')
+
+        if has_dm:
+            recommendations.append('Check serial capillary glucose and intensify glycemic control (often temporary insulin-based correction in acute illness).')
+            actions.append('Set explicit glucose targets and monitor closely while on steroids or during infection.')
+
+        if has_htn_renal:
+            if has_acei_allergy:
+                recommendations.append('Use a non-ACE-inhibitor blood pressure strategy due documented ACE-related reaction; monitor creatinine/eGFR and potassium.')
+            else:
+                recommendations.append('Adjust antihypertensive regimen with renal-safe dosing; monitor creatinine/eGFR and electrolytes.')
+            actions.append('Track fluid status and edema trend to separate cardiorenal vs inflammatory contributors.')
+
+        if has_gout:
+            if has_nsaid_allergy:
+                recommendations.append('Avoid NSAIDs due allergy; consider colchicine or corticosteroid strategy with renal-adjusted dosing.')
+            else:
+                recommendations.append('For acute gout flare, use renal-adjusted anti-inflammatory treatment and avoid nephrotoxic combinations.')
+
+        if has_nsaid_allergy and has_copd:
+            recommendations.append('Use acetaminophen for pain/fever control instead of NSAIDs when clinically appropriate.')
+
+        recommendations = self._merge_unique_strings(recommendations, [], limit=8)
+        actions = self._merge_unique_strings(
+            [
+                'Do not collapse clearly concurrent active diseases into a single label when objective data supports multimorbidity.',
+                'Reconcile allergy list before final medication orders and discharge counseling.',
+            ],
+            actions,
+            limit=7,
+        )
+        return recommendations, actions
+
+    def _apply_multimorbidity_adjustments(self, parsed: Dict[str, Any], symptoms_text: str, clinical_notes: str) -> None:
+        active_conditions = self._detect_multimorbidity_conditions(symptoms_text, clinical_notes)
+        if not active_conditions:
+            return
+
+        combined_text = f"{symptoms_text} {clinical_notes}".lower()
+        active_conditions_sorted = sorted(
+            active_conditions,
+            key=lambda item: float(item.get('score', 0.0)),
+            reverse=True,
+        )
+        parsed['active_diagnoses'] = [item['term'] for item in active_conditions_sorted]
+        existing = list(parsed.get('diagnoses', []))
+        reordered: List[Dict[str, Any]] = []
+
+        # Keep strongly supported active conditions at the top for multimorbidity cases.
+        for item in active_conditions_sorted:
+            reordered.append({'term': item['term'], 'score': float(item.get('score', 0.65))})
+
+        for diag in existing:
+            term = str(diag.get('term', '')).strip()
+            if not term:
+                continue
+            if any(self._diagnoses_match(term, dx['term']) for dx in reordered):
+                continue
+            score = float(diag.get('score', 0.45) or 0.45)
+            # Prevent unrelated respiratory anchor from dominating without supporting pattern.
+            if 'pneumonia' in term.lower():
+                has_cxr_no_consolidation = self._contains_any_marker(
+                    combined_text,
+                    ['no focal consolidation', 'no consolidation', 'without focal consolidation'],
+                )
+                lacks_support = not self._feature_present('cough', combined_text) and not self._feature_present('productive cough', combined_text)
+                if has_cxr_no_consolidation:
+                    score = min(score, 0.30)
+                elif lacks_support:
+                    score = min(score, 0.34)
+            if 'acute copd exacerbation' in term.lower():
+                # Keep acute respiratory diagnosis near the top when present.
+                score = max(score, 0.86)
+            if 'uncontrolled type 2 diabetes mellitus' in term.lower() and any(
+                'acute copd exacerbation' in c.get('term', '').lower() for c in active_conditions_sorted
+            ):
+                score = min(score, 0.82)
+            if 'hypertension with renal impairment' in term.lower() and any(
+                'acute copd exacerbation' in c.get('term', '').lower() for c in active_conditions_sorted
+            ):
+                score = min(score, 0.78)
+            reordered.append({'term': term, 'score': score})
+
+        reordered.sort(key=lambda item: item.get('score', 0.0), reverse=True)
+        deduped: List[Dict[str, Any]] = []
+        seen = set()
+        for item in reordered:
+            key = self._canonical_diagnosis(item.get('term', ''))
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+            if len(deduped) >= 6:
+                break
+        parsed['diagnoses'] = deduped
+
+        if len(active_conditions_sorted) >= 2:
+            parsed['confidence_score'] = max(float(parsed.get('confidence_score', 0.0) or 0.0), 0.72)
+            parsed['interpretation'] = (
+                'Moderate-high confidence - multiple concurrent active conditions detected; manage in parallel and confirm with targeted tests'
+            )
+
+            multitarget_workup, multitarget_actions = self._build_parallel_management_guidance(
+                parsed.get('active_diagnoses', []),
+                combined_text,
+            )
+            parsed['recommendations'] = self._merge_unique_strings(
+                multitarget_workup,
+                parsed.get('recommendations', []),
+                limit=8,
+            )
+
+            parsed['doctor_actions'] = self._merge_unique_strings(
+                multitarget_actions,
+                parsed.get('doctor_actions', []),
+                limit=6,
+            )
+
+            active_terms = ', '.join(parsed['active_diagnoses'][:4])
+            summary_text = (
+                f"Case is most consistent with concurrent active conditions: {active_terms}. "
+                "Management should run in parallel rather than anchoring on a single diagnosis."
+            )
+            previous_summary = str(parsed.get('summary', '')).strip()
+            if previous_summary:
+                parsed['summary'] = f"{summary_text} {previous_summary}"
+            else:
+                parsed['summary'] = summary_text
+
     def _line_to_heading_key(self, line: str) -> str:
         """Normalize a line to a known section heading key when possible"""
         normalized = line.strip().lower()
@@ -821,6 +1263,38 @@ Constraints:
         for flag_name, flag_data in self.red_flag_patterns.items():
             if flag_name == 'multiple_bleeding_sites':
                 continue  # Handle separately
+
+            if flag_name == 'chest_pain_dyspnea':
+                has_chest_pain = self._contains_any_marker(
+                    combined_text,
+                    ['chest pain', 'chest discomfort', 'chest pressure', 'chest tightness'],
+                )
+                has_dyspnea = self._contains_any_marker(
+                    combined_text,
+                    ['shortness of breath', 'dyspnea', 'difficulty breathing', 'breathlessness'],
+                )
+                spo2_value = self._extract_numeric_value(
+                    combined_text,
+                    [r'(?:spo2|oxygen saturation|o2 sat)\s*(?:of|=|:)?\s*(\d{2,3})'],
+                )
+                has_hypoxemia = 0 < spo2_value <= 90
+
+                if not ((has_chest_pain and has_dyspnea) or has_hypoxemia):
+                    continue
+
+                matched_keyword = 'chest pain + dyspnea' if (has_chest_pain and has_dyspnea) else f'hypoxemia (SpO2 {spo2_value:g}%)'
+                detected_flags.append({
+                    'flag': flag_name,
+                    'keyword': matched_keyword,
+                    'severity': flag_data['severity'],
+                    'ddx': flag_data['ddx'],
+                    'workup': flag_data['workup']
+                })
+                if flag_data['severity'] == 'URGENT':
+                    urgency_level = 'URGENT'
+                elif flag_data['severity'] == 'HIGH' and urgency_level == 'ROUTINE':
+                    urgency_level = 'HIGH'
+                continue
             
             keywords = flag_data.get('keywords', [])
             matched = False
@@ -922,10 +1396,13 @@ Constraints:
             'chronic cough': ['chronic coughing', 'persistent cough', 'prolonged cough'],
             'dyspnea': ['shortness of breath', 'difficulty breathing', 'breathlessness', 'sob'],
             'shortness of breath': ['dyspnea', 'difficulty breathing', 'breathlessness', 'sob'],
+            'dyspnea on exertion': ['shortness of breath on exertion', 'exertional dyspnea', 'doe'],
             'chest pain': ['chest discomfort', 'chest pressure', 'chest tightness'],
             'abdominal pain': ['stomach pain', 'belly pain', 'abdominal discomfort', 'tummy pain'],
             'hemoptysis': ['coughing blood', 'coughing up blood', 'blood in sputum', 'bloody cough'],
             'coughing blood': ['hemoptysis', 'coughing up blood', 'blood in sputum'],
+            'productive cough': ['productive sputum', 'phlegm', 'yellow green sputum', 'purulent sputum'],
+            'sputum production': ['productive cough', 'phlegm', 'mucus'],
             'epistaxis': ['nose bleed', 'nosebleed', 'nose bleeding', 'nasal bleeding'],
             'nose bleed': ['epistaxis', 'nosebleed', 'nose bleeding', 'nasal bleeding'],
             'nosebleed': ['epistaxis', 'nose bleed', 'nose bleeding', 'nasal bleeding'],
@@ -945,6 +1422,9 @@ Constraints:
             'runny nose': ['rhinorrhea', 'nasal discharge', 'sipon'],
             'nasal congestion': ['stuffy nose', 'blocked nose', 'baradong ilong'],
             'nasal symptoms': ['runny nose', 'rhinorrhea', 'nasal congestion', 'sneezing', 'sipon'],
+            'wheezing': ['wheeze', 'whistling breath'],
+            'crackles': ['rales', 'basal crackles'],
+            'hypoxemia': ['low oxygen saturation', 'low spo2', 'desaturation'],
             'body aches': ['myalgia', 'muscle pain', 'body pain', 'sakit ng katawan', 'pananakit ng katawan'],
             'myalgia': ['body aches', 'muscle aches', 'muscle pain', 'sakit ng katawan'],
             'sore throat': ['throat pain', 'masakit ang lalamunan'],
@@ -965,6 +1445,37 @@ Constraints:
             'abnormal bleeding': ['bleeding disorder', 'excessive bleeding', 'prolonged bleeding',
                                 'spontaneous bleeding'],
             'bleeding': ['hemorrhage', 'blood loss'],
+            'hyperglycemia': [
+                'high blood glucose',
+                'high blood sugar',
+                'elevated glucose',
+                'fasting blood glucose',
+                'fbg',
+                'hba1c',
+                'elevated hba1c',
+                'poor glycemic control',
+                'uncontrolled diabetes',
+            ],
+            'elevated hba1c': ['hba1c', 'glycated hemoglobin', 'a1c'],
+            'hypertension': ['high blood pressure', 'bp', 'elevated blood pressure'],
+            'renal impairment': [
+                'kidney impairment',
+                'renal dysfunction',
+                'chronic kidney disease',
+                'reduced egfr',
+                'egfr',
+                'elevated creatinine',
+            ],
+            'elevated creatinine': ['creatinine', 'high creatinine'],
+            'reduced egfr': ['low egfr', 'egfr', 'reduced gfr'],
+            'acute joint pain': ['sudden joint pain', 'acute monoarthritis', 'joint pain'],
+            'great toe pain': ['big toe pain', '1st mcp pain', 'podagra', 'first metatarsophalangeal pain'],
+            'mcp1 swelling': ['first mcp swelling', 'swollen great toe joint', 'swollen mcp'],
+            'joint tenderness': ['tender joint', 'extremely tender', 'painful to touch'],
+            'warm joint': ['hot joint', 'warmth over joint'],
+            'hyperuricemia': ['elevated uric acid', 'serum uric acid', 'high uric acid'],
+            'poor medication adherence': ['poor adherence', 'nonadherence', 'non-adherence', 'missed medications'],
+            'peripheral edema': ['ankle swelling', 'leg swelling', 'pedal edema'],
         }
         
         # Add synonyms if available
@@ -1182,13 +1693,18 @@ Constraints:
 
             # Step 5c: Refine specific rare-pattern cases for safer differentials and clinician guidance
             self._refine_rare_endocrine_pattern(parsed, analysis_symptoms, analysis_notes)
+
+            # Step 5d: Support multimorbidity cases (multiple active diagnoses in one patient)
+            self._apply_multimorbidity_adjustments(parsed, analysis_symptoms, analysis_notes)
             
             # Step 6: Normalize medications and apply fallback if safe
             parsed['medications'] = self._normalize_medications(parsed.get('medications', []))
             if not parsed['medications'] and parsed['diagnoses']:
                 fallback_meds = self._build_fallback_medications(
                     parsed['diagnoses'][0]['term'],
-                    red_flag_analysis
+                    red_flag_analysis,
+                    f"{analysis_symptoms} {analysis_notes}",
+                    parsed.get('active_diagnoses', []),
                 )
                 if fallback_meds:
                     parsed['medications'] = fallback_meds
@@ -1207,6 +1723,7 @@ Constraints:
                 'summary': parsed.get('summary', ''),
                 'recommendations': parsed['recommendations'],
                 'medications': parsed['medications'],
+                'active_diagnoses': parsed.get('active_diagnoses', []),
                 'red_flag_analysis': red_flag_analysis,
                 'validation_warning': parsed.get('validation_warning', None)
             }
@@ -1413,6 +1930,7 @@ Keep output concise, clinically actionable, and doctor-readable."""
 
         return {
             'diagnoses': diagnoses[:6],
+            'active_diagnoses': [],
             'confidence_score': confidence_score,
             'interpretation': interpretation,
             'recommendations': recommendations,
@@ -1598,13 +2116,33 @@ Keep output concise, clinically actionable, and doctor-readable."""
         return normalized
 
     def _build_fallback_medications(
-        self, primary_diagnosis: str, red_flag_analysis: Dict[str, Any]
+        self,
+        primary_diagnosis: str,
+        red_flag_analysis: Dict[str, Any],
+        case_text: str = '',
+        active_diagnoses: List[str] = None,
     ) -> List[Dict[str, str]]:
-        """Return conservative fallback medications only when red-flag risk is low"""
-        if red_flag_analysis.get('has_red_flags'):
-            return []
+        """Return conservative fallback medications with allergy-aware filtering."""
+        active_diagnoses = active_diagnoses or []
 
         diagnosis_lower = primary_diagnosis.lower()
+        combined_lower = f"{primary_diagnosis} {' '.join(active_diagnoses)} {case_text}".lower()
+
+        has_penicillin_allergy = self._contains_any_marker(
+            combined_lower,
+            ['penicillin allergy', 'allergy to penicillin', 'penicillin caused hives', 'penicillin caused swelling'],
+        )
+        has_nsaid_allergy = self._contains_any_marker(
+            combined_lower,
+            ['nsaid allergy', 'allergy to nsaid', 'ibuprofen allergy', 'naproxen allergy'],
+        )
+
+        # In high-risk red-flag cases we generally avoid fallback medication generation,
+        # except for supportive acute airway management.
+        if red_flag_analysis.get('has_red_flags') and 'copd' not in diagnosis_lower:
+            if not any('acute copd exacerbation' in str(dx).lower() for dx in active_diagnoses):
+                return []
+
         alias_map = {
             'urinary tract infection': 'uti',
             'gastroesophageal reflux disease': 'gerd',
@@ -1612,13 +2150,25 @@ Keep output concise, clinically actionable, and doctor-readable."""
             'community acquired pneumonia': 'pneumonia',
             'influenza-like illness': 'influenza-like illness',
             'viral upper respiratory infection': 'viral upper respiratory infection',
+            'acute copd exacerbation': 'acute copd exacerbation',
         }
+        protocol_keys = sorted(self.medication_protocols.keys(), key=len, reverse=True)
 
         protocol_key = ''
-        for key in self.medication_protocols.keys():
+        for key in protocol_keys:
             if key in diagnosis_lower:
                 protocol_key = key
                 break
+
+        if not protocol_key:
+            for dx in active_diagnoses:
+                dx_lower = str(dx).lower()
+                for key in protocol_keys:
+                    if key in dx_lower:
+                        protocol_key = key
+                        break
+                if protocol_key:
+                    break
 
         if not protocol_key:
             for alias, mapped_key in alias_map.items():
@@ -1629,7 +2179,35 @@ Keep output concise, clinically actionable, and doctor-readable."""
         if not protocol_key:
             return []
 
-        return [dict(item) for item in self.medication_protocols.get(protocol_key, [])]
+        meds = [dict(item) for item in self.medication_protocols.get(protocol_key, [])]
+
+        if has_penicillin_allergy:
+            meds = [
+                med for med in meds
+                if not any(token in med.get('medication_name', '').lower() for token in ['penicillin', 'amoxicillin'])
+            ]
+            if protocol_key == 'pneumonia' and not meds:
+                meds.append(
+                    {
+                        'medication_name': 'Doxycycline',
+                        'dosage': '100 mg',
+                        'frequency': 'PO every 12 hours',
+                        'duration': '5 days',
+                        'instructions': 'Non-penicillin option when bacterial respiratory infection is suspected and clinically appropriate.',
+                    }
+                )
+
+        if has_nsaid_allergy:
+            meds = [
+                med for med in meds
+                if not any(
+                    token in med.get('medication_name', '').lower()
+                    for token in ['ibuprofen', 'naproxen', 'diclofenac', 'ketorolac', 'nsaid']
+                )
+            ]
+
+        # Keep fallback concise and conservative.
+        return meds[:5]
 
     def _build_doctor_facing_reasoning(
         self, parsed: Dict[str, Any], red_flag_analysis: Dict[str, Any], hypotheses: Dict[str, Any]
@@ -1648,6 +2226,12 @@ Keep output concise, clinically actionable, and doctor-readable."""
             lines.append(f"**PRIMARY DIAGNOSIS**: {parsed['diagnoses'][0]['term']}")
         else:
             lines.append("**PRIMARY DIAGNOSIS**: Undifferentiated syndrome - further workup required")
+
+        active_diagnoses = parsed.get('active_diagnoses', [])
+        if isinstance(active_diagnoses, list) and len(active_diagnoses) > 1:
+            lines.append("**ACTIVE DIAGNOSES (MULTIMORBIDITY)**")
+            for idx, diagnosis in enumerate(active_diagnoses[:5], 1):
+                lines.append(f"{idx}. {diagnosis}")
 
         lines.append("**DIFFERENTIAL DIAGNOSES**")
         if parsed.get('diagnoses'):
@@ -1714,6 +2298,9 @@ Keep output concise, clinically actionable, and doctor-readable."""
             'coughing': 'Cough',
             'ubo': 'Cough',
             'inuubo': 'Cough',
+            'productive cough': 'Productive Cough',
+            'yellow-green sputum': 'Purulent Sputum',
+            'purulent sputum': 'Purulent Sputum',
             'hemoptysis': 'Hemoptysis',
             'coughing blood': 'Hemoptysis',
             'coughing up blood': 'Hemoptysis',
@@ -1722,9 +2309,16 @@ Keep output concise, clinically actionable, and doctor-readable."""
             'shortness of breath': 'Dyspnea',
             'difficulty breathing': 'Dyspnea',
             'breathlessness': 'Dyspnea',
+            'shortness of breath on exertion': 'Dyspnea on Exertion',
+            'exertional dyspnea': 'Dyspnea on Exertion',
             'chest pain': 'Chest Pain',
             'chest discomfort': 'Chest Pain',
             'chest pressure': 'Chest Pain',
+            'wheezing': 'Wheezing',
+            'wheeze': 'Wheezing',
+            'crackles': 'Crackles',
+            'rales': 'Crackles',
+            'spo2': 'Low Oxygen Saturation',
             'fatigue': 'Fatigue',
             'tiredness': 'Fatigue',
             'exhaustion': 'Fatigue',
@@ -1816,6 +2410,28 @@ Keep output concise, clinically actionable, and doctor-readable."""
             'chills': 'Chills',
             'hypertension': 'Hypertension',
             'high blood pressure': 'Hypertension',
+            'ankle swelling': 'Peripheral Edema',
+            'peripheral edema': 'Peripheral Edema',
+            'polyuria': 'Polyuria',
+            'polydipsia': 'Polydipsia',
+            'hyperglycemia': 'Hyperglycemia',
+            'high blood sugar': 'Hyperglycemia',
+            'hba1c': 'Elevated HbA1c',
+            'elevated hba1c': 'Elevated HbA1c',
+            'renal impairment': 'Renal Impairment',
+            'reduced egfr': 'Renal Impairment',
+            'elevated creatinine': 'Elevated Creatinine',
+            'gout': 'Gout',
+            'acute gout flare': 'Acute Gout Flare',
+            'podagra': 'Acute Gout Flare',
+            'great toe pain': 'Great Toe Pain',
+            'metatarsophalangeal': 'Great Toe Joint Inflammation',
+            'uric acid': 'Hyperuricemia',
+            'hyperuricemia': 'Hyperuricemia',
+            'poor adherence': 'Poor Medication Adherence',
+            'nonadherence': 'Poor Medication Adherence',
+            'irregular rhythm': 'Irregular Rhythm',
+            'premature atrial contractions': 'Premature Atrial Contractions',
         }
         
         found_keywords = []
@@ -1856,6 +2472,7 @@ Keep output concise, clinically actionable, and doctor-readable."""
             'summary': '',
             'recommendations': [],
             'medications': [],
+            'active_diagnoses': [],
             'red_flag_analysis': {'has_red_flags': False, 'urgency_level': 'UNKNOWN', 'detected_flags': []}
         }
 

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { diagnosisAPI } from '../services/api';
 import { formatAIOutput, safeNumber, formatPercentage } from '../utils/formatUtils';
+import { useFeedback } from './ui/FeedbackProvider';
 import {
   defaultMedicationSchedule,
   inferScheduleFromFrequency,
@@ -52,6 +53,7 @@ interface AIAnalysis {
     term: string;
     score: number;
   }>;
+  active_diagnoses?: string[];
   keywords: string[];
   interpretation: string;
   clinical_reasoning?: string;
@@ -90,7 +92,6 @@ interface AIAnalysis {
   feedback_loop_info?: {
     used_hints: boolean;
     hint_count: number;
-    hints: string[];
   };
   error?: string;
 }
@@ -98,6 +99,8 @@ interface AIAnalysis {
 type MedicationField = keyof Omit<Medication, 'id'>;
 
 const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
+  const { notify, confirm } = useFeedback();
+
   const createMedicationDraft = (): Medication => ({
     id: Date.now() + Math.floor(Math.random() * 1000),
     medication_name: '',
@@ -123,6 +126,7 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
   const [streamStatuses, setStreamStatuses] = useState<string[]>([]);
   const [streamedPreview, setStreamedPreview] = useState('');
   const [feedbackNote, setFeedbackNote] = useState('');
+  const latestStatus = streamStatuses.length > 0 ? streamStatuses[streamStatuses.length - 1] : '';
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     setFormData((prev) => ({
@@ -253,9 +257,19 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
     return [...existing, ...uniqueAIMeds];
   };
 
+  const appendAIMedications = (aiMeds: Medication[]) => {
+    if (!aiMeds.length) return;
+    const merged = mergeAIMedications(medications, aiMeds);
+    const addedCount = merged.length - medications.length;
+    if (addedCount > 0) {
+      notify(`Auto-filled ${addedCount} AI medication suggestion(s).`, 'info', 2400);
+    }
+    setMedications(merged);
+  };
+
   const handleAnalyzeSymptoms = async () => {
     if (!formData.symptoms) {
-      alert('Please enter symptoms first');
+      notify('Please enter symptoms first.', 'warning');
       return;
     }
 
@@ -301,9 +315,7 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
       if (analysis) {
         setAiAnalysis(analysis);
         const aiMeds: Medication[] = Array.isArray(analysis?.medications) ? analysis.medications : [];
-        if (aiMeds.length > 0) {
-          setMedications((prev) => mergeAIMedications(prev, aiMeds));
-        }
+        appendAIMedications(aiMeds);
       } else {
         throw new Error('Stream completed without analysis payload');
       }
@@ -319,27 +331,34 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
         const aiMeds: Medication[] = Array.isArray(fallbackAnalysis?.medications)
           ? fallbackAnalysis.medications
           : [];
-        if (aiMeds.length > 0) {
-          setMedications((prev) => mergeAIMedications(prev, aiMeds));
-        }
+        appendAIMedications(aiMeds);
         setStreamStatuses((prev) => [...prev, 'Fallback mode used: non-stream analysis completed.']);
       } catch (fallbackError: any) {
-        alert(`Error: ${fallbackError.response?.data?.error || fallbackError.message || error.message}`);
+        notify(
+          `Analysis failed: ${fallbackError.response?.data?.error || fallbackError.message || error.message}`,
+          'error'
+        );
       }
     } finally {
       setAnalyzing(false);
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const clearFormState = () => {
+    setFormData({
+      patient_name: '',
+      patient_id: '',
+      symptoms: '',
+      clinical_notes: '',
+      diagnosis_text: '',
+    });
+    setAiAnalysis(null);
+    setMedications([]);
+    setFeedbackNote('');
+  };
 
-    if (!formData.diagnosis_text.trim()) {
-      alert('Please enter a final diagnosis');
-      return;
-    }
-
-    const preparedMedications = medications
+  const buildPreparedMedications = () =>
+    medications
       .map(({ id, ...med }) => {
         const schedule = {
           schedule_type: med.schedule_type,
@@ -367,8 +386,9 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
         (med) =>
           med.medication_name || med.dosage || med.frequency || med.duration || med.instructions
       );
-
-    const hasIncompleteMedication = preparedMedications.some(
+  
+  const hasIncompleteMedication = (preparedMedications: ReturnType<typeof buildPreparedMedications>) =>
+    preparedMedications.some(
       (med) =>
         !med.medication_name ||
         !med.dosage ||
@@ -389,8 +409,29 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
           med.frequency
         )
     );
-    if (hasIncompleteMedication) {
-      alert('Each medication must include name, dosage, duration, and a valid schedule (frequency text or structured timing).');
+
+  const saveDiagnosis = async (targetStatus: 'draft' | 'pending') => {
+    const patientName = formData.patient_name.trim();
+    const patientId = formData.patient_id.trim();
+    const symptoms = formData.symptoms.trim();
+    const diagnosisText = formData.diagnosis_text.trim();
+
+    if (!patientName || !patientId || !symptoms) {
+      notify('Patient name, patient ID, and symptoms are required.', 'warning');
+      return;
+    }
+
+    if (targetStatus === 'pending' && !diagnosisText) {
+      notify('Please enter a final diagnosis before submitting for review.', 'warning');
+      return;
+    }
+
+    const preparedMedications = buildPreparedMedications();
+    if (hasIncompleteMedication(preparedMedications)) {
+      notify(
+        'Each medication must include name, dosage, duration, and a valid schedule.',
+        'warning'
+      );
       return;
     }
 
@@ -398,40 +439,46 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
     try {
       const dataToSubmit = {
         ...formData,
+        patient_name: patientName,
+        patient_id: patientId,
+        symptoms,
+        diagnosis_text:
+          targetStatus === 'draft'
+            ? diagnosisText || 'Draft - pending final diagnosis'
+            : diagnosisText,
         ai_prediction: aiAnalysis,
-        status: 'pending',
+        status: targetStatus,
         medications: preparedMedications,
         feedback_note: feedbackNote.trim(),
       };
 
       await diagnosisAPI.createDiagnosis(dataToSubmit);
 
-      alert('Diagnosis saved successfully');
-
-      setFormData({
-        patient_name: '',
-        patient_id: '',
-        symptoms: '',
-        clinical_notes: '',
-        diagnosis_text: '',
-      });
-      setAiAnalysis(null);
-      setMedications([]);
-      setFeedbackNote('');
+      notify(targetStatus === 'draft' ? 'Draft saved successfully.' : 'Diagnosis submitted for review.', 'success');
+      clearFormState();
 
       if (onSuccess) {
         onSuccess();
       }
     } catch (error: any) {
-      alert(`Error: ${error.response?.data?.error || error.message}`);
+      notify(`Save failed: ${error.response?.data?.error || error.message}`, 'error');
     } finally {
       setLoading(false);
     }
   };
 
+  const handleSaveDraft = async () => {
+    await saveDiagnosis('draft');
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await saveDiagnosis('pending');
+  };
+
   return (
-    <div className="max-w-5xl mx-auto px-4">
-      <div className="bg-white rounded-lg border border-gray-200">
+    <div className="diagnosis-form-theme max-w-5xl mx-auto px-4">
+      <div className="diagnosis-shell-card rounded-lg border border-gray-200">
         <div className="border-b border-gray-200 px-6 py-4">
           <div className="flex items-center justify-between">
             <div>
@@ -440,21 +487,20 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
             </div>
             <button
               type="button"
-              onClick={() => {
-                if (window.confirm('Clear all form data?')) {
-                  setFormData({
-                    patient_name: '',
-                    patient_id: '',
-                    symptoms: '',
-                    clinical_notes: '',
-                    diagnosis_text: '',
-                  });
-                  setAiAnalysis(null);
-                  setMedications([]);
-                  setFeedbackNote('');
+              onClick={async () => {
+                const accepted = await confirm({
+                  title: 'Clear Form',
+                  message: 'Clear all unsaved patient and diagnosis data?',
+                  confirmText: 'Clear',
+                  cancelText: 'Keep Editing',
+                  tone: 'warning',
+                });
+                if (accepted) {
+                  clearFormState();
+                  notify('Form cleared.', 'info', 1800);
                 }
               }}
-              className="text-xs text-gray-600 hover:text-gray-900 px-3 py-1.5 border border-gray-300 rounded hover:bg-gray-50 transition-colors"
+              className="ui-btn ui-btn-ghost ui-btn-sm"
             >
               Clear Form
             </button>
@@ -528,30 +574,31 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
               type="button"
               onClick={handleAnalyzeSymptoms}
               disabled={analyzing || !formData.symptoms}
-              className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
+              className="ui-btn ui-btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {analyzing ? 'Analyzing...' : 'Analyze with Med42-v3 AI'}
             </button>
           </div>
 
           {analyzing && (
-            <div className="border border-gray-200 bg-gray-50 rounded-lg p-4 space-y-3">
-              <h3 className="text-sm font-semibold text-gray-900">Hybrid AI Progress</h3>
-              {streamStatuses.length > 0 ? (
-                <ul className="space-y-1">
-                  {streamStatuses.map((message, index) => (
-                    <li key={`${message}-${index}`} className="text-xs text-gray-700">
-                      {index + 1}. {message}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-xs text-gray-600">Initializing analysis...</p>
-              )}
+            <div className="llm-thinking-wrap">
+              <p className="llm-thinking-title">Med42 Is Processing</p>
+              <div className="thinking-line">
+                <span className="thinking-word">Thinking</span>
+                <span className="thinking-dots" aria-hidden="true">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </span>
+              </div>
+              <p className="thinking-subtext">Analyzing findings, calibrating risks, and validating safety checks.</p>
+              <div className="stream-status-chip">
+                {latestStatus || 'Preparing diagnostic reasoning pipeline...'}
+              </div>
               {streamedPreview && (
-                <div className="bg-white border border-gray-200 rounded p-2">
-                  <p className="text-xs font-medium text-gray-700 mb-1">Live Clinical Draft</p>
-                  <p className="text-xs text-gray-700 whitespace-pre-wrap line-clamp-6">{streamedPreview}</p>
+                <div className="stream-preview-panel">
+                  <p className="stream-preview-label">Live Draft</p>
+                  <p className="stream-preview-text whitespace-pre-wrap line-clamp-6">{streamedPreview}</p>
                 </div>
               )}
             </div>
@@ -649,6 +696,19 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
                       </div>
                     ))}
                   </div>
+                </div>
+              )}
+
+              {Array.isArray(aiAnalysis.active_diagnoses) && aiAnalysis.active_diagnoses.length > 1 && (
+                <div className="bg-indigo-50 border border-indigo-200 rounded p-3">
+                  <p className="text-xs font-semibold text-indigo-900 mb-2">Active Diagnoses (Parallel Management)</p>
+                  <ul className="space-y-1">
+                    {aiAnalysis.active_diagnoses.map((dx, index) => (
+                      <li key={`${dx}-${index}`} className="text-xs text-indigo-800">
+                        - {dx}
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               )}
 
@@ -785,13 +845,6 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
                       ? `Applied ${aiAnalysis.feedback_loop_info.hint_count} similar doctor correction hint(s) to calibrate this run.`
                       : 'No prior matching doctor corrections were applied for this case.'}
                   </p>
-                  {aiAnalysis.feedback_loop_info.hints?.length > 0 && (
-                    <ul className="mt-2 space-y-1">
-                      {aiAnalysis.feedback_loop_info.hints.map((hint, idx) => (
-                        <li key={idx} className="text-xs text-indigo-800">- {hint}</li>
-                      ))}
-                    </ul>
-                  )}
                 </div>
               )}
 
@@ -823,7 +876,7 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
           )}
 
           <div>
-            <label className="label">Final Diagnosis *</label>
+            <label className="label">Final Diagnosis (Required to Submit for Review)</label>
             <textarea
               name="diagnosis_text"
               value={formData.diagnosis_text}
@@ -854,7 +907,7 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
               <button
                 type="button"
                 onClick={addMedicationRow}
-                className="text-xs px-3 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+                className="ui-btn ui-btn-primary ui-btn-sm"
               >
                 + Add Medication
               </button>
@@ -873,7 +926,7 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
                   <button
                     type="button"
                     onClick={() => med.id && removeMedication(med.id)}
-                    className="text-xs px-2 py-1 border border-red-200 text-red-700 rounded hover:bg-red-50 transition-colors"
+                    className="ui-btn ui-btn-danger ui-btn-sm"
                   >
                     Remove
                   </button>
@@ -1070,11 +1123,19 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({ onSuccess }) => {
 
           <div className="flex gap-2 pt-4 border-t border-gray-200">
             <button
-              type="submit"
-              disabled={loading || !formData.diagnosis_text}
-              className="btn-success disabled:opacity-50 disabled:cursor-not-allowed"
+              type="button"
+              onClick={handleSaveDraft}
+              disabled={loading || !formData.patient_name.trim() || !formData.patient_id.trim() || !formData.symptoms.trim()}
+              className="ui-btn ui-btn-slate disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {loading ? 'Saving...' : 'Save Diagnosis'}
+              {loading ? 'Saving...' : 'Save Draft'}
+            </button>
+            <button
+              type="submit"
+              disabled={loading || !formData.diagnosis_text.trim()}
+              className="ui-btn ui-btn-success disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {loading ? 'Saving...' : 'Submit for Review'}
             </button>
           </div>
         </form>

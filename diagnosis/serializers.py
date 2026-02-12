@@ -210,6 +210,10 @@ class MedicationSerializer(serializers.ModelSerializer):
 class DiagnosisSerializer(serializers.ModelSerializer):
     medications = MedicationSerializer(many=True, required=False)
     doctor_name = serializers.SerializerMethodField()
+    feedback_count = serializers.SerializerMethodField()
+    latest_feedback_note = serializers.SerializerMethodField()
+    latest_feedback_summary = serializers.SerializerMethodField()
+    latest_feedback_at = serializers.SerializerMethodField()
     
     class Meta:
         model = Diagnosis
@@ -227,7 +231,11 @@ class DiagnosisSerializer(serializers.ModelSerializer):
             'created_at', 
             'updated_at', 
             'approved_at', 
-            'medications'
+            'medications',
+            'feedback_count',
+            'latest_feedback_note',
+            'latest_feedback_summary',
+            'latest_feedback_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'approved_at']
 
@@ -276,6 +284,40 @@ class DiagnosisSerializer(serializers.ModelSerializer):
         if obj.doctor.first_name and obj.doctor.last_name:
             return f"Dr. {obj.doctor.first_name} {obj.doctor.last_name}"
         return obj.doctor.username
+
+    def _latest_feedback(self, obj):
+        cache = getattr(obj, '_prefetched_objects_cache', {})
+        entries = cache.get('feedback_entries')
+        if entries is not None:
+            if not entries:
+                return None
+            return max(entries, key=lambda item: item.created_at)
+        return obj.feedback_entries.order_by('-created_at').first()
+
+    def get_feedback_count(self, obj):
+        cache = getattr(obj, '_prefetched_objects_cache', {})
+        entries = cache.get('feedback_entries')
+        if entries is not None:
+            return len(entries)
+        return obj.feedback_entries.count()
+
+    def get_latest_feedback_note(self, obj):
+        entry = self._latest_feedback(obj)
+        if not entry:
+            return ''
+        return str(entry.feedback_note or '').strip()
+
+    def get_latest_feedback_summary(self, obj):
+        entry = self._latest_feedback(obj)
+        if not entry:
+            return ''
+        return str(entry.correction_summary or '').strip()
+
+    def get_latest_feedback_at(self, obj):
+        entry = self._latest_feedback(obj)
+        if not entry:
+            return None
+        return entry.created_at
 
 
 class UserSerializer(serializers.ModelSerializer):

@@ -4,15 +4,17 @@ Django settings for backend project.
 
 from pathlib import Path
 import os
+import importlib
+import importlib.util
 try:
     from dotenv import load_dotenv
 except ImportError:
     def load_dotenv(*args, **kwargs):
         return False
-try:
-    import dj_database_url
-except ImportError:
-    dj_database_url = None
+
+dj_database_url = None
+if importlib.util.find_spec('dj_database_url') is not None:
+    dj_database_url = importlib.import_module('dj_database_url')
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 

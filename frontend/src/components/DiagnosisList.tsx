@@ -20,7 +20,22 @@ interface Diagnosis {
   approved_at?: string;
   ai_prediction?: any;
   medications?: Array<any>;
+  feedback_count?: number;
+  latest_feedback_note?: string;
+  latest_feedback_summary?: string;
+  latest_feedback_at?: string | null;
 }
+
+const hasMeaningfulAIAnalysis = (aiPrediction: any): boolean => {
+  if (!aiPrediction || typeof aiPrediction !== 'object') return false;
+  if (typeof aiPrediction.clinical_reasoning === 'string' && aiPrediction.clinical_reasoning.trim()) return true;
+  if (Array.isArray(aiPrediction.suggested_diagnoses) && aiPrediction.suggested_diagnoses.length > 0) return true;
+  if (Array.isArray(aiPrediction.active_diagnoses) && aiPrediction.active_diagnoses.length > 0) return true;
+  if (Array.isArray(aiPrediction.keywords) && aiPrediction.keywords.length > 0) return true;
+  if (Array.isArray(aiPrediction.recommendations) && aiPrediction.recommendations.length > 0) return true;
+  if (typeof aiPrediction.confidence_score === 'number' && aiPrediction.confidence_score > 0) return true;
+  return false;
+};
 
 const DiagnosisList: React.FC<DiagnosisListProps> = ({ refreshKey }) => {
   const [diagnoses, setDiagnoses] = useState<Diagnosis[]>([]);
@@ -80,47 +95,47 @@ const DiagnosisList: React.FC<DiagnosisListProps> = ({ refreshKey }) => {
   }
 
   return (
-    <div className="px-4">
+    <div className="diagnosis-list-theme px-4">
       {/* Filter Tabs */}
-      <div className="mb-4 bg-white rounded-lg border border-gray-200 p-3">
+      <div className="mb-4 diagnosis-shell-card rounded-lg border border-gray-200 p-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap gap-2">
             <button
               onClick={() => setFilterStatus('all')}
-              className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+              className={`ui-btn ui-btn-sm ${
                 filterStatus === 'all'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
+                  ? 'ui-btn-primary'
+                  : 'ui-btn-ghost'
               }`}
             >
               All ({diagnoses.length})
             </button>
             <button
               onClick={() => setFilterStatus('draft')}
-              className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+              className={`ui-btn ui-btn-sm ${
                 filterStatus === 'draft'
-                  ? 'bg-gray-600 text-white'
-                  : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
+                  ? 'ui-btn-slate'
+                  : 'ui-btn-ghost'
               }`}
             >
               Draft ({diagnoses.filter(d => d.status === 'draft').length})
             </button>
             <button
               onClick={() => setFilterStatus('pending')}
-              className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+              className={`ui-btn ui-btn-sm ${
                 filterStatus === 'pending'
-                  ? 'bg-yellow-600 text-white'
-                  : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
+                  ? 'ui-btn-warning'
+                  : 'ui-btn-ghost'
               }`}
             >
               Pending ({diagnoses.filter(d => d.status === 'pending').length})
             </button>
             <button
               onClick={() => setFilterStatus('approved')}
-              className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+              className={`ui-btn ui-btn-sm ${
                 filterStatus === 'approved'
-                  ? 'bg-green-600 text-white'
-                  : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
+                  ? 'ui-btn-success'
+                  : 'ui-btn-ghost'
               }`}
             >
               Approved ({diagnoses.filter(d => d.status === 'approved').length})
@@ -128,7 +143,7 @@ const DiagnosisList: React.FC<DiagnosisListProps> = ({ refreshKey }) => {
           </div>
           <button
             onClick={fetchDiagnoses}
-            className="px-3 py-1.5 text-xs font-medium text-gray-700 border border-gray-300 rounded hover:bg-gray-50 transition-colors"
+            className="ui-btn ui-btn-ghost ui-btn-sm"
           >
             Refresh
           </button>
@@ -141,7 +156,7 @@ const DiagnosisList: React.FC<DiagnosisListProps> = ({ refreshKey }) => {
           <p className="text-xs text-red-800 mb-2">Error: {error}</p>
           <button
             onClick={fetchDiagnoses}
-            className="text-xs px-3 py-1.5 bg-red-600 text-white rounded hover:bg-red-700 transition-colors"
+            className="ui-btn ui-btn-danger ui-btn-sm"
           >
             Try Again
           </button>
@@ -157,7 +172,7 @@ const DiagnosisList: React.FC<DiagnosisListProps> = ({ refreshKey }) => {
           </div>
         </div>
       ) : filteredDiagnoses.length === 0 ? (
-        <div className="bg-white rounded-lg border border-gray-200 p-12 text-center">
+        <div className="diagnosis-shell-card rounded-lg border border-gray-200 p-12 text-center">
           <p className="text-sm text-gray-600">
             {filterStatus === 'all' 
               ? 'No diagnoses found' 
@@ -184,7 +199,7 @@ const DiagnosisList: React.FC<DiagnosisListProps> = ({ refreshKey }) => {
                     </div>
                     <p className="text-xs text-gray-600">ID: {diagnosis.patient_id}</p>
                   </div>
-                  {diagnosis.ai_prediction && (
+                  {hasMeaningfulAIAnalysis(diagnosis.ai_prediction) && (
                     <div className="flex items-center gap-1 bg-blue-50 px-2 py-1 rounded border border-blue-200">
                       <span className="text-xs text-blue-700">AI:</span>
                       <span className="text-xs font-semibold text-blue-900">
@@ -210,11 +225,39 @@ const DiagnosisList: React.FC<DiagnosisListProps> = ({ refreshKey }) => {
                   </div>
                 </div>
 
+                {Array.isArray(diagnosis.ai_prediction?.active_diagnoses) &&
+                diagnosis.ai_prediction.active_diagnoses.length > 1 ? (
+                  <div className="mb-3 bg-indigo-50 border border-indigo-200 rounded p-2">
+                    <p className="text-xs font-medium text-indigo-700 mb-1">Active Diagnoses</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {diagnosis.ai_prediction.active_diagnoses.slice(0, 4).map((item: string, idx: number) => (
+                        <span
+                          key={`${item}-${idx}`}
+                          className="px-2 py-0.5 text-xs bg-indigo-100 text-indigo-800 rounded border border-indigo-200"
+                        >
+                          {item}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {diagnosis.feedback_count ? (
+                  <div className="mb-3 bg-amber-50 border border-amber-200 rounded p-2">
+                    <p className="text-xs font-medium text-amber-700">
+                      AI Feedback Saved ({diagnosis.feedback_count})
+                    </p>
+                    <p className="text-xs text-gray-700 line-clamp-2">
+                      {diagnosis.latest_feedback_note || diagnosis.latest_feedback_summary || 'Doctor feedback captured.'}
+                    </p>
+                  </div>
+                ) : null}
+
                 {/* Footer */}
                 <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-gray-200">
                   <div className="flex flex-wrap items-center gap-3 text-xs text-gray-500">
                     <span>{diagnosis.doctor_name || 'N/A'}</span>
-                    <span>•</span>
+                    <span>|</span>
                     <span>{new Date(diagnosis.created_at).toLocaleDateString()}</span>
                   </div>
                   <div className="flex items-center gap-2">
@@ -223,7 +266,7 @@ const DiagnosisList: React.FC<DiagnosisListProps> = ({ refreshKey }) => {
                         {diagnosis.medications.length} Med{diagnosis.medications.length !== 1 ? 's' : ''}
                       </span>
                     )}
-                    <span className="text-xs text-blue-600 font-medium">View →</span>
+                    <span className="text-xs text-blue-600 font-medium">View -&gt;</span>
                   </div>
                 </div>
               </div>

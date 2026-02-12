@@ -52,6 +52,7 @@ class HybridDiagnosisOrchestrator:
         cache_key = self._build_cache_key(symptoms, clinical_notes)
         cached = self._get_cached(cache_key)
         if cached:
+            cached = self._sanitize_feedback_payload(cached)
             yield {'event': 'status', 'data': {'stage': 'cache', 'message': 'Using cached analysis...'}}
             if include_tokens:
                 for token in self._tokenize_for_stream(cached['ai_analysis'].get('clinical_reasoning', '')):
@@ -149,6 +150,7 @@ class HybridDiagnosisOrchestrator:
             },
         }
 
+        payload = self._sanitize_feedback_payload(payload)
         self._set_cached(cache_key, payload)
 
         if include_tokens:
@@ -278,15 +280,29 @@ class HybridDiagnosisOrchestrator:
         patient_facts: Dict[str, Any],
     ) -> Dict[str, Any]:
         suggested = med42_result.get('suggested_diagnoses', [])
-        primary = ''
-        if isinstance(suggested, list) and suggested:
-            primary = str(suggested[0].get('term', '')).strip()
-
+        active_diagnoses = self._clean_strings(med42_result.get('active_diagnoses', []), limit=6)
         differential = []
-        for item in suggested[:5]:
-            term = str(item.get('term', '')).strip()
-            if term:
+        seen_differentials = set()
+        for term in active_diagnoses:
+            key = term.lower().strip()
+            if not key or key in seen_differentials:
+                continue
+            seen_differentials.add(key)
+            differential.append(term)
+        if isinstance(suggested, list):
+            for item in suggested[:6]:
+                term = str(item.get('term', '')).strip()
+                key = term.lower()
+                if not term or key in seen_differentials:
+                    continue
+                seen_differentials.add(key)
                 differential.append(term)
+
+        primary = ''
+        if active_diagnoses:
+            primary = active_diagnoses[0]
+        elif differential:
+            primary = differential[0]
 
         red_flags = []
         red_flag_analysis = med42_result.get('red_flag_analysis', {})
@@ -319,6 +335,7 @@ class HybridDiagnosisOrchestrator:
         standardized = {
             'primary_diagnosis': primary,
             'differential_diagnoses': differential,
+            'active_diagnoses': active_diagnoses,
             'red_flags': red_flags,
             'recommended_workup': self._clean_strings(med42_result.get('recommendations', []), limit=6),
             'medications': medications,
@@ -486,12 +503,12 @@ class HybridDiagnosisOrchestrator:
         feedback_info = {
             'used_hints': bool(feedback_hints),
             'hint_count': len(feedback_hints),
-            'hints': [hint.get('summary', '') for hint in feedback_hints[:3]],
         }
 
         return {
             'confidence_score': standardized.get('confidence_score', 0.0),
             'suggested_diagnoses': suggested,
+            'active_diagnoses': self._clean_strings(standardized.get('active_diagnoses', []), limit=6),
             'keywords': self._clean_strings(med42_result.get('keywords', patient_facts.get('sx', [])), limit=14),
             'interpretation': interpretation,
             'clinical_reasoning': reasoning,
@@ -536,6 +553,11 @@ class HybridDiagnosisOrchestrator:
 
         if differentials:
             confidence_drivers.append(f"Primary diagnosis ranked #1 among {len(differentials)} differential candidates.")
+        active_diagnoses = self._clean_strings(standardized.get('active_diagnoses', []), limit=6)
+        if len(active_diagnoses) > 1:
+            confidence_drivers.append(
+                f"Detected {len(active_diagnoses)} concurrent active diagnoses requiring parallel management."
+            )
         if len(features) >= 3:
             confidence_drivers.append(f"{len(features)} relevant clinical features were detected from symptoms/notes.")
         if standardized.get('red_flags'):
@@ -697,6 +719,12 @@ class HybridDiagnosisOrchestrator:
 
         primary = standardized.get('primary_diagnosis', '')
         lines.append(f"PRIMARY DIAGNOSIS: {primary or 'Undifferentiated presentation'}")
+
+        active_diagnoses = self._clean_strings(standardized.get('active_diagnoses', []), limit=6)
+        if len(active_diagnoses) > 1:
+            lines.append('ACTIVE DIAGNOSES:')
+            for idx, diagnosis in enumerate(active_diagnoses[:5], 1):
+                lines.append(f"{idx}. {diagnosis}")
 
         lines.append('DIFFERENTIAL DIAGNOSES:')
         differentials = standardized.get('differential_diagnoses', [])
@@ -914,6 +942,23 @@ class HybridDiagnosisOrchestrator:
 
         self._cache[key] = {'timestamp': time.time(), 'payload': payload}
 
+    def _sanitize_feedback_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+
+        ai_analysis = payload.get('ai_analysis')
+        if not isinstance(ai_analysis, dict):
+            return payload
+
+        feedback_info = ai_analysis.get('feedback_loop_info')
+        if isinstance(feedback_info, dict):
+            ai_analysis['feedback_loop_info'] = {
+                'used_hints': bool(feedback_info.get('used_hints', False)),
+                'hint_count': int(feedback_info.get('hint_count', 0) or 0),
+            }
+        payload['ai_analysis'] = ai_analysis
+        return payload
+
     def _clean_strings(self, values: Any, limit: int = 6) -> List[str]:
         if not isinstance(values, list):
             return []
@@ -955,6 +1000,7 @@ class HybridDiagnosisOrchestrator:
         return {
             'primary_diagnosis': '',
             'differential_diagnoses': [],
+            'active_diagnoses': [],
             'red_flags': [],
             'recommended_workup': [],
             'medications': [],
@@ -971,6 +1017,7 @@ class HybridDiagnosisOrchestrator:
             'error': error_text,
             'confidence_score': 0.0,
             'suggested_diagnoses': [],
+            'active_diagnoses': [],
             'keywords': [],
             'interpretation': 'Analysis failed',
             'clinical_reasoning': error_text,
@@ -989,7 +1036,7 @@ class HybridDiagnosisOrchestrator:
                 },
                 'diagnosis_evidence': [],
             },
-            'feedback_loop_info': {'used_hints': False, 'hint_count': 0, 'hints': []},
+            'feedback_loop_info': {'used_hints': False, 'hint_count': 0},
             'red_flag_analysis': {'has_red_flags': False, 'urgency_level': 'UNKNOWN', 'detected_flags': []},
             'validation_warning': error_text,
             'validator_info': {

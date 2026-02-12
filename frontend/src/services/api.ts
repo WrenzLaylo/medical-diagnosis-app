@@ -88,6 +88,8 @@ export const diagnosisAPI = {
   getAllDiagnoses: () => api.get('/diagnoses/'),
   
   getDiagnosis: (id: number) => api.get(`/diagnoses/${id}/`),
+
+  deleteDiagnosis: (id: number) => api.delete(`/diagnoses/${id}/`),
   
   createDiagnosis: (data: any) => {
     console.log('Creating diagnosis with data:', data);
@@ -96,6 +98,12 @@ export const diagnosisAPI = {
   
   updateDiagnosis: (id: number, data: any) => 
     api.patch(`/diagnoses/${id}/update_diagnosis/`, data),
+
+  submitForReview: (id: number, data: any = {}) =>
+    api.post(`/diagnoses/${id}/submit_for_review/`, data),
+
+  reanalyzeDiagnosis: (id: number) =>
+    api.post(`/diagnoses/${id}/reanalyze/`, {}),
   
   approveDiagnosis: (id: number, data: any = {}) => 
     api.post(`/diagnoses/${id}/approve/`, data),

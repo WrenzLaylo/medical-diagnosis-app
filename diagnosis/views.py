@@ -34,7 +34,11 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         """Filter diagnoses by query parameters"""
-        queryset = Diagnosis.objects.all().order_by('-created_at')
+        queryset = (
+            Diagnosis.objects.select_related('doctor')
+            .prefetch_related('medications', 'feedback_entries')
+            .order_by('-created_at')
+        )
         status_param = self.request.query_params.get('status', None)
         patient_id = self.request.query_params.get('patient_id', None)
         
@@ -98,16 +102,34 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
     def _update_medication_safety_snapshot(self, diagnosis: Diagnosis) -> None:
         ai_prediction = diagnosis.ai_prediction if isinstance(diagnosis.ai_prediction, dict) else {}
         medications = self._serialize_doctor_medications(diagnosis) or self._serialize_ai_medications(ai_prediction)
+        if not ai_prediction and not medications:
+            return
         context = f"{diagnosis.symptoms}\n{diagnosis.clinical_notes}".strip()
         medication_safety = self.medication_safety_engine.assess(medications, context)
         ai_prediction['medication_safety'] = medication_safety
         diagnosis.ai_prediction = ai_prediction
         diagnosis.save(update_fields=['ai_prediction', 'updated_at'])
 
+    def destroy(self, request, *args, **kwargs):
+        diagnosis = self.get_object()
+        if diagnosis.status != 'draft':
+            return Response(
+                {'message': 'Only draft diagnoses can be deleted.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        self.perform_destroy(diagnosis)
+        return Response({'message': 'Draft deleted successfully'}, status=status.HTTP_200_OK)
+
     def _capture_feedback_entry(self, diagnosis: Diagnosis, source_action: str, feedback_note: str = '') -> None:
         ai_prediction = diagnosis.ai_prediction if isinstance(diagnosis.ai_prediction, dict) else {}
         if not ai_prediction:
             return
+
+        ai_active = []
+        for item in ai_prediction.get('active_diagnoses', [])[:6]:
+            value = str(item).strip()
+            if value:
+                ai_active.append(value)
 
         ai_suggested = []
         for item in ai_prediction.get('suggested_diagnoses', [])[:6]:
@@ -117,7 +139,16 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
             if term:
                 ai_suggested.append(term)
 
-        ai_primary = ai_suggested[0] if ai_suggested else ''
+        combined_ai_suggested = []
+        seen = set()
+        for term in ai_active + ai_suggested:
+            key = self._normalize_text(term)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            combined_ai_suggested.append(term)
+
+        ai_primary = combined_ai_suggested[0] if combined_ai_suggested else ''
         doctor_final = str(diagnosis.diagnosis_text or '').strip()
         if not doctor_final:
             return
@@ -139,7 +170,9 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
                 if med.get('medication_name')
             }
         )
-        diagnosis_changed = bool(ai_primary) and not self._diagnosis_match(ai_primary, doctor_final)
+        diagnosis_changed = bool(combined_ai_suggested) and not any(
+            self._diagnosis_match(candidate, doctor_final) for candidate in combined_ai_suggested[:6]
+        )
         medications_changed = ai_med_names != doctor_med_names
 
         correction_flags = []
@@ -170,7 +203,7 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
             symptom_signature=(diagnosis.symptoms or '')[:1200],
             ai_primary_diagnosis=ai_primary[:255],
             doctor_final_diagnosis=doctor_final[:255],
-            ai_suggested_diagnoses=ai_suggested,
+            ai_suggested_diagnoses=combined_ai_suggested,
             ai_medications=ai_medications,
             doctor_medications=doctor_medications,
             correction_flags=correction_flags,
@@ -326,7 +359,8 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
             diagnosis = serializer.instance
             if diagnosis is not None:
                 self._update_medication_safety_snapshot(diagnosis)
-                self._capture_feedback_entry(diagnosis, source_action='create', feedback_note=feedback_note)
+                if diagnosis.status != 'draft':
+                    self._capture_feedback_entry(diagnosis, source_action='create', feedback_note=feedback_note)
             
             headers = self.get_success_headers(serializer.data)
             return Response(
@@ -343,6 +377,84 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
             )
     
     @action(detail=True, methods=['post'])
+    def submit_for_review(self, request, pk=None):
+        """Move a draft diagnosis to pending review."""
+        diagnosis = self.get_object()
+        feedback_note = str(request.data.get('feedback_note', '')).strip()
+
+        if diagnosis.status == 'approved':
+            return Response(
+                {'message': 'Approved diagnoses cannot be submitted for review.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if diagnosis.status == 'pending':
+            serializer = self.get_serializer(diagnosis)
+            return Response(
+                {'message': 'Diagnosis is already pending review.', 'data': serializer.data},
+                status=status.HTTP_200_OK
+            )
+
+        final_diagnosis = str(diagnosis.diagnosis_text or '').strip().lower()
+        if not final_diagnosis or final_diagnosis == 'draft - pending final diagnosis':
+            return Response(
+                {'message': 'Please provide a final diagnosis before submitting for review.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        diagnosis.status = 'pending'
+        diagnosis.approved_at = None
+        diagnosis.save(update_fields=['status', 'approved_at', 'updated_at'])
+        self._update_medication_safety_snapshot(diagnosis)
+        self._capture_feedback_entry(diagnosis, source_action='update', feedback_note=feedback_note)
+
+        serializer = self.get_serializer(diagnosis)
+        return Response(
+            {'message': 'Draft submitted for review successfully', 'data': serializer.data},
+            status=status.HTTP_200_OK
+        )
+
+    @action(detail=True, methods=['post'])
+    def reanalyze(self, request, pk=None):
+        """Run AI analysis for an existing diagnosis and persist ai_prediction."""
+        diagnosis = self.get_object()
+        symptoms = str(diagnosis.symptoms or '').strip()
+        clinical_notes = str(diagnosis.clinical_notes or '').strip()
+
+        if not symptoms:
+            return Response(
+                {'message': 'Symptoms are required to run AI analysis.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            payload = hybrid_orchestrator.analyze(symptoms=symptoms, clinical_notes=clinical_notes)
+            ai_analysis = payload.get('ai_analysis', {})
+            if not isinstance(ai_analysis, dict):
+                ai_analysis = {}
+
+            diagnosis.ai_prediction = ai_analysis
+            diagnosis.save(update_fields=['ai_prediction', 'updated_at'])
+            self._update_medication_safety_snapshot(diagnosis)
+
+            serializer = self.get_serializer(diagnosis)
+            return Response(
+                {
+                    'message': 'AI analysis updated successfully',
+                    'ai_analysis': ai_analysis,
+                    'data': serializer.data,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except Exception as exc:
+            print(f"Error reanalyzing diagnosis #{diagnosis.id}: {exc}")
+            traceback.print_exc()
+            return Response(
+                {'message': f'AI reanalysis failed: {exc}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
         """Approve a diagnosis"""
         diagnosis = self.get_object()
@@ -351,6 +463,12 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
         if diagnosis.status == 'approved':
             return Response(
                 {'message': 'Diagnosis is already approved'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if diagnosis.status == 'draft':
+            return Response(
+                {'message': 'Submit draft for review before approval.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -397,7 +515,8 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
             updated = serializer.instance
             if updated is not None:
                 self._update_medication_safety_snapshot(updated)
-                self._capture_feedback_entry(updated, source_action='update', feedback_note=feedback_note)
+                if updated.status != 'draft':
+                    self._capture_feedback_entry(updated, source_action='update', feedback_note=feedback_note)
             return Response(serializer.data)
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

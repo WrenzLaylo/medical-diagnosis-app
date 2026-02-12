@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { diagnosisAPI } from '../services/api';
 import { formatAIOutput, safeNumber, formatPercentage, getConfidenceGradient } from '../utils/formatUtils';
+import { useFeedback } from './ui/FeedbackProvider';
 import {
   defaultMedicationSchedule,
   inferScheduleFromFrequency,
@@ -26,6 +27,7 @@ interface Diagnosis {
       term: string;
       score: number;
     }>;
+    active_diagnoses?: string[];
     keywords?: string[];
     interpretation?: string;
     clinical_reasoning?: string;
@@ -69,7 +71,6 @@ interface Diagnosis {
     feedback_loop_info?: {
       used_hints: boolean;
       hint_count: number;
-      hints: string[];
     };
   };
   medications?: Array<{
@@ -96,6 +97,17 @@ interface DiagnosisDetailProps {
   diagnosis: Diagnosis;
   onClose: () => void;
 }
+
+const hasMeaningfulAIAnalysis = (aiPrediction?: Diagnosis['ai_prediction']): boolean => {
+  if (!aiPrediction) return false;
+  if (typeof aiPrediction.clinical_reasoning === 'string' && aiPrediction.clinical_reasoning.trim()) return true;
+  if (Array.isArray(aiPrediction.suggested_diagnoses) && aiPrediction.suggested_diagnoses.length > 0) return true;
+  if (Array.isArray(aiPrediction.active_diagnoses) && aiPrediction.active_diagnoses.length > 0) return true;
+  if (Array.isArray(aiPrediction.keywords) && aiPrediction.keywords.length > 0) return true;
+  if (Array.isArray(aiPrediction.recommendations) && aiPrediction.recommendations.length > 0) return true;
+  if (typeof aiPrediction.confidence_score === 'number' && aiPrediction.confidence_score > 0) return true;
+  return false;
+};
 
 type EditableMedication = {
   id?: number;
@@ -155,6 +167,7 @@ const mapDiagnosisMedication = (med: NonNullable<Diagnosis['medications']>[numbe
 };
 
 const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose }) => {
+  const { notify, confirm } = useFeedback();
   const initialState = {
     diagnosis_text: diagnosis.diagnosis_text,
     clinical_notes: diagnosis.clinical_notes || '',
@@ -164,6 +177,9 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
   const [isEditing, setIsEditing] = useState(false);
   const [editedDiagnosis, setEditedDiagnosis] = useState(initialState);
   const [feedbackNote, setFeedbackNote] = useState('');
+  const [reanalyzing, setReanalyzing] = useState(false);
+  const [deletingDraft, setDeletingDraft] = useState(false);
+  const hasAISection = hasMeaningfulAIAnalysis(diagnosis.ai_prediction);
 
   const handleMedicationFieldChange = (
     localId: number,
@@ -250,7 +266,7 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
         )
     );
     if (hasIncompleteMedication) {
-      alert('Each medication must include name, dosage, duration, and a valid schedule (frequency text or structured timing).');
+      notify('Each medication must include name, dosage, duration, and a valid schedule.', 'warning');
       return;
     }
 
@@ -261,27 +277,92 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
         medications: medicationsPayload,
         feedback_note: feedbackNote.trim(),
       });
-      alert('Diagnosis updated successfully');
+      notify('Diagnosis updated successfully.', 'success');
       setFeedbackNote('');
       setIsEditing(false);
       onClose();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error updating diagnosis:', error);
-      alert('Error updating diagnosis.');
+      notify(`Error updating diagnosis: ${error.response?.data?.message || error.message}`, 'error');
     }
   };
 
   const handleApprove = async () => {
-    if (window.confirm('Are you sure you want to approve this diagnosis?')) {
-      try {
-        await diagnosisAPI.approveDiagnosis(diagnosis.id, { feedback_note: feedbackNote.trim() });
-        alert('Diagnosis approved successfully');
-        setFeedbackNote('');
-        onClose();
-      } catch (error) {
-        console.error('Error approving diagnosis:', error);
-        alert('Error approving diagnosis.');
-      }
+    const accepted = await confirm({
+      title: 'Approve Diagnosis',
+      message: 'Confirm approval of this diagnosis?',
+      confirmText: 'Approve',
+      cancelText: 'Cancel',
+      tone: 'success',
+    });
+    if (!accepted) return;
+
+    try {
+      await diagnosisAPI.approveDiagnosis(diagnosis.id, { feedback_note: feedbackNote.trim() });
+      notify('Diagnosis approved successfully.', 'success');
+      setFeedbackNote('');
+      onClose();
+    } catch (error: any) {
+      console.error('Error approving diagnosis:', error);
+      notify(`Error approving diagnosis: ${error.response?.data?.message || error.message}`, 'error');
+    }
+  };
+
+  const handleSubmitForReview = async () => {
+    const finalDiagnosisText = (isEditing ? editedDiagnosis.diagnosis_text : diagnosis.diagnosis_text).trim();
+    const draftPlaceholder = 'draft - pending final diagnosis';
+    if (!finalDiagnosisText || finalDiagnosisText.toLowerCase() === draftPlaceholder) {
+      notify('Please enter a final diagnosis before submitting draft for review.', 'warning');
+      return;
+    }
+
+    try {
+      await diagnosisAPI.submitForReview(diagnosis.id, { feedback_note: feedbackNote.trim() });
+      notify('Draft submitted for review.', 'success');
+      setFeedbackNote('');
+      onClose();
+    } catch (error: any) {
+      console.error('Error submitting draft for review:', error);
+      notify(`Error submitting draft for review: ${error.response?.data?.message || error.message}`, 'error');
+    }
+  };
+
+  const handleReanalyzeDraft = async () => {
+    if (reanalyzing) return;
+    setReanalyzing(true);
+    try {
+      await diagnosisAPI.reanalyzeDiagnosis(diagnosis.id);
+      notify('AI analysis completed. Reopening updated record...', 'success');
+      onClose();
+    } catch (error: any) {
+      console.error('Error reanalyzing diagnosis:', error);
+      notify(`AI analysis failed: ${error.response?.data?.message || error.message}`, 'error');
+    } finally {
+      setReanalyzing(false);
+    }
+  };
+
+  const handleDeleteDraft = async () => {
+    if (diagnosis.status !== 'draft' || deletingDraft) return;
+    const accepted = await confirm({
+      title: 'Delete Draft',
+      message: 'Delete this draft permanently?',
+      confirmText: 'Delete',
+      cancelText: 'Keep Draft',
+      tone: 'error',
+    });
+    if (!accepted) return;
+
+    setDeletingDraft(true);
+    try {
+      await diagnosisAPI.deleteDiagnosis(diagnosis.id);
+      notify('Draft deleted.', 'success');
+      onClose();
+    } catch (error: any) {
+      console.error('Error deleting draft:', error);
+      notify(`Error deleting draft: ${error.response?.data?.message || error.message}`, 'error');
+    } finally {
+      setDeletingDraft(false);
     }
   };
 
@@ -297,11 +378,11 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
   };
 
   return (
-    <div className="max-w-6xl mx-auto px-4 space-y-4">
-      <div className="bg-white rounded-lg border border-gray-200 p-4 flex flex-wrap items-center justify-between gap-2">
+    <div className="diagnosis-form-theme max-w-6xl mx-auto px-4 space-y-4">
+      <div className="diagnosis-shell-card rounded-lg border border-gray-200 p-4 flex flex-wrap items-center justify-between gap-2">
         <button
           onClick={onClose}
-          className="px-4 py-2 text-sm border border-gray-300 rounded hover:bg-gray-50 transition-colors"
+          className="ui-btn ui-btn-ghost"
         >
           Back to List
         </button>
@@ -309,17 +390,42 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
         {diagnosis.status !== 'approved' && !isEditing && (
           <div className="flex gap-2">
             <button
+              onClick={handleReanalyzeDraft}
+              disabled={reanalyzing}
+              className="ui-btn ui-btn-primary disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {reanalyzing ? 'Analyzing...' : 'Run AI Analysis'}
+            </button>
+            <button
               onClick={() => setIsEditing(true)}
-              className="px-4 py-2 text-sm border border-blue-300 text-blue-700 rounded hover:bg-blue-50 transition-colors"
+              className="ui-btn ui-btn-primary"
             >
               Edit
             </button>
-            <button
-              onClick={handleApprove}
-              className="px-4 py-2 text-sm bg-green-600 text-white rounded hover:bg-green-700 transition-colors"
-            >
-              Approve
-            </button>
+            {diagnosis.status === 'draft' ? (
+              <>
+                <button
+                  onClick={handleSubmitForReview}
+                  className="ui-btn ui-btn-warning"
+                >
+                  Submit for Review
+                </button>
+                <button
+                  onClick={handleDeleteDraft}
+                  disabled={deletingDraft}
+                  className="ui-btn ui-btn-danger disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {deletingDraft ? 'Deleting...' : 'Delete Draft'}
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={handleApprove}
+                className="ui-btn ui-btn-success"
+              >
+                Approve
+              </button>
+            )}
           </div>
         )}
 
@@ -327,13 +433,13 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
           <div className="flex gap-2">
             <button
               onClick={handleCancel}
-              className="px-4 py-2 text-sm border border-gray-300 rounded hover:bg-gray-50 transition-colors"
+              className="ui-btn ui-btn-ghost"
             >
               Cancel
             </button>
             <button
               onClick={handleEdit}
-              className="px-4 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+              className="ui-btn ui-btn-primary"
             >
               Save Changes
             </button>
@@ -341,7 +447,7 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
         )}
       </div>
 
-      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+      <div className="diagnosis-shell-card rounded-lg border border-gray-200 overflow-hidden">
         <div className="border-b border-gray-200 px-6 py-4 bg-slate-50">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
@@ -384,7 +490,15 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
             )}
           </div>
 
-          {diagnosis.ai_prediction && (
+          {!hasAISection && (
+            <div className="bg-blue-50 border border-blue-200 rounded p-3">
+              <p className="text-xs text-blue-800">
+                No AI analysis yet for this record. Use <span className="font-semibold">Run AI Analysis</span> to generate Med42 output.
+              </p>
+            </div>
+          )}
+
+          {hasAISection && diagnosis.ai_prediction && (
             <div className="border border-blue-200 bg-blue-50 rounded-lg p-4 space-y-4">
               <div className="border-b border-blue-200 pb-3">
                 <h3 className="text-sm font-semibold text-gray-900">Med42-v3 AI Analysis</h3>
@@ -464,6 +578,20 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
                     ))}
                   </div>
                 </div>
+              )}
+
+              {Array.isArray(diagnosis.ai_prediction.active_diagnoses) &&
+                diagnosis.ai_prediction.active_diagnoses.length > 1 && (
+                  <div className="bg-indigo-50 border border-indigo-200 rounded p-3">
+                    <p className="text-xs font-semibold text-indigo-900 mb-2">Active Diagnoses (Parallel Management)</p>
+                    <ul className="space-y-1">
+                      {diagnosis.ai_prediction.active_diagnoses.map((dx, index) => (
+                        <li key={`${dx}-${index}`} className="text-xs text-indigo-800">
+                          - {dx}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
               )}
 
               {diagnosis.ai_prediction.recommendations && diagnosis.ai_prediction.recommendations.length > 0 && (
@@ -593,7 +721,7 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
                 <button
                   type="button"
                   onClick={addMedication}
-                  className="text-xs px-3 py-1.5 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+                  className="ui-btn ui-btn-primary ui-btn-sm"
                 >
                   + Add Medication
                 </button>
@@ -614,7 +742,7 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
                       <button
                         type="button"
                         onClick={() => removeMedication(med.local_id)}
-                        className="text-xs px-2 py-1 border border-red-200 text-red-700 rounded hover:bg-red-50 transition-colors"
+                        className="ui-btn ui-btn-danger ui-btn-sm"
                       >
                         Remove
                       </button>
