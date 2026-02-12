@@ -513,6 +513,9 @@ Constraints:
         normalized = normalized.replace('nf1', 'neurofibromatosis type 1')
         normalized = normalized.replace('familial adenomatous polyposis', 'fap')
         normalized = normalized.replace('podagra', 'gout')
+        normalized = normalized.replace('complicated urinary tract infection', 'urinary tract infection')
+        normalized = re.sub(r'^septic shock\b.*', 'septic shock', normalized)
+        normalized = re.sub(r'^sepsis\b.*', 'sepsis', normalized)
         normalized = re.sub(r'[^a-z0-9\s]', ' ', normalized)
         normalized = re.sub(r'\s+', ' ', normalized).strip()
         return normalized
@@ -806,7 +809,8 @@ Constraints:
             if not match:
                 continue
             try:
-                return float(match.group(1))
+                raw_value = str(match.group(1)).replace(',', '').strip()
+                return float(raw_value)
             except (TypeError, ValueError):
                 continue
         return -1.0
@@ -817,6 +821,183 @@ Constraints:
             return []
 
         conditions: List[Dict[str, Any]] = []
+
+        bp_match = re.search(r'\bbp\s*(?:of|=|:)?\s*(\d{2,3})\s*/\s*(\d{2,3})\b', combined, flags=re.IGNORECASE)
+        systolic = -1
+        diastolic = -1
+        if bp_match:
+            try:
+                systolic = int(bp_match.group(1))
+                diastolic = int(bp_match.group(2))
+            except (TypeError, ValueError):
+                systolic = -1
+                diastolic = -1
+
+        map_value = -1.0
+        if systolic > 0 and diastolic > 0:
+            map_value = diastolic + ((systolic - diastolic) / 3.0)
+
+        temp_value = self._extract_numeric_value(
+            combined,
+            [r'(?:temp(?:erature)?)\s*(?:of|=|:)?\s*(\d{2}(?:\.\d+)?)'],
+        )
+        hr_value = self._extract_numeric_value(
+            combined,
+            [r'\b(?:heart\s*rate|hr)\s*(?:of|=|:)?\s*(\d{2,3})\b'],
+        )
+        rr_value = self._extract_numeric_value(
+            combined,
+            [r'\b(?:respiratory\s*rate|rr)\s*(?:of|=|:)?\s*(\d{2,3})\b'],
+        )
+        spo2_value = self._extract_numeric_value(
+            combined,
+            [r'(?:spo2|oxygen saturation|o2 sat)\s*(?:of|=|:)?\s*(\d{2,3})'],
+        )
+        lactate_value = self._extract_numeric_value(
+            combined,
+            [r'\blactate\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)'],
+        )
+        wbc_value = self._extract_numeric_value(
+            combined,
+            [r'\b(?:wbc|white blood cell(?: count)?)\s*(?:of|=|:)?\s*([0-9]{1,3}(?:,\d{3})?(?:\.\d+)?)'],
+        )
+        creatinine_value = self._extract_numeric_value(
+            combined,
+            [r'(?:serum\s+)?creatinine\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)'],
+        )
+
+        has_fever_or_temp = (
+            temp_value >= 38.0
+            or self._contains_any_marker(combined, ['fever', 'febrile', 'temperature'])
+        )
+        has_tachycardia = hr_value >= 100
+        has_tachypnea = rr_value >= 22
+        has_hypoxemia = 0 < spo2_value <= 92
+        has_hypotension = (
+            (systolic > 0 and systolic <= 90)
+            or (map_value > 0 and map_value < 65)
+            or self._contains_any_marker(combined, ['hypotension', 'shock', 'septic shock'])
+        )
+        has_altered_mental_state = self._contains_any_marker(
+            combined,
+            ['confused', 'disoriented', 'altered mental status', 'lethargic', 'encephalopathy'],
+        )
+        has_oliguria = self._contains_any_marker(
+            combined,
+            ['decreased urine output', 'oliguria', 'anuria'],
+        )
+        has_inflammatory_response = (
+            wbc_value >= 12000
+            or lactate_value >= 2.0
+            or self._contains_any_marker(
+                combined,
+                ['procalcitonin elevated', 'crp elevated', 'left shift', 'leukocytosis'],
+            )
+        )
+        has_organ_dysfunction = (
+            lactate_value >= 2.0
+            or creatinine_value >= 2.0
+            or has_altered_mental_state
+            or has_oliguria
+        )
+
+        has_negative_consolidation = self._contains_any_marker(
+            combined,
+            ['no focal consolidation', 'without focal consolidation', 'no consolidation'],
+        )
+        has_consolidation_marker = self._contains_any_marker(
+            combined,
+            ['consolidation', 'lobar infiltrate', 'chest x-ray reveals', 'chest xray reveals'],
+        )
+        has_respiratory_infection_features = self._contains_any_marker(
+            combined,
+            ['productive cough', 'yellow sputum', 'green sputum', 'purulent sputum', 'crackles', 'pneumonia'],
+        )
+        has_pneumonia_source = (
+            (has_consolidation_marker and not has_negative_consolidation)
+            or (has_respiratory_infection_features and has_fever_or_temp and has_inflammatory_response)
+        )
+        has_urinary_source = self._contains_any_marker(
+            combined,
+            [
+                'urinary tract infection',
+                'uti',
+                'positive leukocyte esterase',
+                'nitrites',
+                'pyuria',
+                'suprapubic tenderness',
+                'dysuria',
+                '>100 wbc/hpf',
+            ],
+        )
+
+        infection_sources: List[str] = []
+        if has_pneumonia_source:
+            infection_sources.append('pneumonia')
+        if has_urinary_source:
+            infection_sources.append('urinary tract infection')
+
+        if infection_sources and has_hypotension and (has_organ_dysfunction or has_inflammatory_response):
+            if len(infection_sources) == 2:
+                source_label = 'pneumonia and/or urinary tract infection'
+            else:
+                source_label = infection_sources[0]
+            evidence = []
+            if systolic > 0 and diastolic > 0:
+                evidence.append(f'BP {systolic}/{diastolic}')
+            if map_value > 0:
+                evidence.append(f'Estimated MAP {map_value:.0f}')
+            if lactate_value >= 0:
+                evidence.append(f'lactate {lactate_value:g} mmol/L')
+            if wbc_value >= 0:
+                evidence.append(f'WBC {wbc_value:g}/uL')
+            if has_altered_mental_state:
+                evidence.append('altered mental status')
+            if has_hypoxemia:
+                evidence.append(f'SpO2 {spo2_value:g}% on room air')
+            conditions.append(
+                {
+                    'term': f'Septic shock secondary to {source_label}',
+                    'score': 0.98 if lactate_value >= 4.0 else 0.95,
+                    'evidence': evidence[:6],
+                }
+            )
+        elif infection_sources and has_inflammatory_response and (has_fever_or_temp or has_tachycardia or has_tachypnea):
+            source_label = ' and '.join(infection_sources)
+            evidence = []
+            if has_fever_or_temp:
+                evidence.append('febrile/inflammatory pattern')
+            if has_tachycardia:
+                evidence.append(f'HR {hr_value:g}')
+            if has_tachypnea:
+                evidence.append(f'RR {rr_value:g}')
+            if lactate_value >= 0:
+                evidence.append(f'lactate {lactate_value:g} mmol/L')
+            conditions.append(
+                {
+                    'term': f'Sepsis likely secondary to {source_label}',
+                    'score': 0.90,
+                    'evidence': evidence[:5],
+                }
+            )
+
+        if has_pneumonia_source:
+            conditions.append(
+                {
+                    'term': 'Pneumonia (probable infectious source)',
+                    'score': 0.76 if has_inflammatory_response else 0.68,
+                    'evidence': ['respiratory infection features with objective inflammation'],
+                }
+            )
+
+        if has_urinary_source:
+            conditions.append(
+                {
+                    'term': 'Complicated urinary tract infection',
+                    'score': 0.76 if has_inflammatory_response else 0.68,
+                    'evidence': ['positive urinary infection markers'],
+                }
+            )
 
         # Acute COPD exacerbation should be treated as a high-priority active diagnosis.
         has_copd_history = self._contains_any_marker(
@@ -835,12 +1016,7 @@ Constraints:
             combined,
             ['wheezing', 'wheeze', 'crackles', 'rales'],
         )
-        has_fever = self._contains_any_marker(combined, ['fever', 'febrile', 'temperature'])
-        spo2_value = self._extract_numeric_value(
-            combined,
-            [r'(?:spo2|oxygen saturation|o2 sat)\s*(?:of|=|:)?\s*(\d{2,3})'],
-        )
-        has_hypoxemia = 0 < spo2_value <= 92
+        has_fever = has_fever_or_temp
         if has_copd_history and has_dyspnea and (has_cough or has_wheeze_or_crackles):
             evidence = ['known COPD']
             if has_dyspnea:
@@ -908,22 +1084,8 @@ Constraints:
             )
 
         # Hypertension with renal impairment.
-        bp_match = re.search(r'\bbp\s*(?:of|=|:)?\s*(\d{2,3})\s*/\s*(\d{2,3})\b', combined, flags=re.IGNORECASE)
-        systolic = -1
-        diastolic = -1
-        if bp_match:
-            try:
-                systolic = int(bp_match.group(1))
-                diastolic = int(bp_match.group(2))
-            except (TypeError, ValueError):
-                systolic = -1
-                diastolic = -1
         has_htn = self._contains_any_marker(combined, ['hypertension', 'high blood pressure']) or (
             systolic >= 140 or diastolic >= 90
-        )
-        creatinine_value = self._extract_numeric_value(
-            combined,
-            [r'(?:serum\s+)?creatinine\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)'],
         )
         egfr_value = self._extract_numeric_value(
             combined,
@@ -1020,6 +1182,10 @@ Constraints:
 
     def _build_parallel_management_guidance(self, active_terms: List[str], combined_text: str) -> Tuple[List[str], List[str]]:
         lower_terms = [self._canonical_diagnosis(item) for item in active_terms]
+        has_septic_shock = any('septic shock' in item for item in lower_terms)
+        has_sepsis = has_septic_shock or any(item.startswith('sepsis') for item in lower_terms)
+        has_pneumonia_source = any('pneumonia' in item for item in lower_terms)
+        has_uti_source = any('urinary tract infection' in item or item == 'uti' for item in lower_terms)
         has_copd = any('acute copd exacerbation' in item or item == 'copd' for item in lower_terms)
         has_dm = any('type 2 diabetes' in item or 'uncontrolled' in item for item in lower_terms)
         has_htn_renal = any('hypertension with renal impairment' in item for item in lower_terms)
@@ -1040,6 +1206,25 @@ Constraints:
 
         recommendations: List[str] = []
         actions: List[str] = []
+
+        if has_sepsis:
+            recommendations.extend(
+                [
+                    'Treat as sepsis/septic shock emergency: obtain blood cultures before first antibiotic dose when feasible, then administer broad-spectrum therapy promptly.',
+                    'Start aggressive isotonic crystalloid resuscitation and reassess perfusion, urine output, lactate trend, and MAP response.',
+                    'Escalate to vasopressors if hypotension persists after fluid challenge; target MAP >=65 and ICU-level monitoring.',
+                ]
+            )
+            if has_penicillin_allergy:
+                recommendations.append('Use a non-penicillin empiric antibiotic strategy due severe penicillin allergy history; involve stewardship/pharmacy for local protocol.')
+            if has_pneumonia_source or has_uti_source:
+                sources = []
+                if has_pneumonia_source:
+                    sources.append('pneumonia')
+                if has_uti_source:
+                    sources.append('urinary source')
+                recommendations.append(f"Prioritize source-directed diagnostics and control for suspected {' + '.join(sources)}.")
+            actions.append('Activate sepsis pathway immediately; do not let chronic comorbidity optimization delay shock stabilization.')
 
         if has_copd:
             recommendations.extend(
@@ -1093,6 +1278,11 @@ Constraints:
             key=lambda item: float(item.get('score', 0.0)),
             reverse=True,
         )
+        has_septic_pattern = any(
+            'septic shock' in str(item.get('term', '')).lower()
+            or 'sepsis' in str(item.get('term', '')).lower()
+            for item in active_conditions_sorted
+        )
         parsed['active_diagnoses'] = [item['term'] for item in active_conditions_sorted]
         existing = list(parsed.get('diagnoses', []))
         reordered: List[Dict[str, Any]] = []
@@ -1130,6 +1320,15 @@ Constraints:
                 'acute copd exacerbation' in c.get('term', '').lower() for c in active_conditions_sorted
             ):
                 score = min(score, 0.78)
+            if has_septic_pattern and (
+                'uncontrolled type 2 diabetes mellitus' in term.lower()
+                or 'hypertension with renal impairment' in term.lower()
+            ):
+                score = min(score, 0.72)
+            if has_septic_pattern and 'septic shock' in term.lower():
+                score = max(score, 0.96)
+            elif has_septic_pattern and 'sepsis' in term.lower():
+                score = max(score, 0.90)
             reordered.append({'term': term, 'score': score})
 
         reordered.sort(key=lambda item: item.get('score', 0.0), reverse=True)
@@ -1145,11 +1344,18 @@ Constraints:
                 break
         parsed['diagnoses'] = deduped
 
-        if len(active_conditions_sorted) >= 2:
-            parsed['confidence_score'] = max(float(parsed.get('confidence_score', 0.0) or 0.0), 0.72)
+        if has_septic_pattern:
+            parsed['confidence_score'] = max(float(parsed.get('confidence_score', 0.0) or 0.0), 0.86)
             parsed['interpretation'] = (
-                'Moderate-high confidence - multiple concurrent active conditions detected; manage in parallel and confirm with targeted tests'
+                'High confidence - critical infection syndrome detected; stabilize sepsis/shock first and manage comorbidities in parallel'
             )
+
+        if len(active_conditions_sorted) >= 2:
+            if not has_septic_pattern:
+                parsed['confidence_score'] = max(float(parsed.get('confidence_score', 0.0) or 0.0), 0.72)
+                parsed['interpretation'] = (
+                    'Moderate-high confidence - multiple concurrent active conditions detected; manage in parallel and confirm with targeted tests'
+                )
 
             multitarget_workup, multitarget_actions = self._build_parallel_management_guidance(
                 parsed.get('active_diagnoses', []),
@@ -1168,10 +1374,16 @@ Constraints:
             )
 
             active_terms = ', '.join(parsed['active_diagnoses'][:4])
-            summary_text = (
-                f"Case is most consistent with concurrent active conditions: {active_terms}. "
-                "Management should run in parallel rather than anchoring on a single diagnosis."
-            )
+            if has_septic_pattern:
+                summary_text = (
+                    f"Critical illness pattern is most consistent with {parsed['active_diagnoses'][0]}. "
+                    f"Treat with immediate sepsis bundle while concurrently managing active comorbidities: {active_terms}."
+                )
+            else:
+                summary_text = (
+                    f"Case is most consistent with concurrent active conditions: {active_terms}. "
+                    "Management should run in parallel rather than anchoring on a single diagnosis."
+                )
             previous_summary = str(parsed.get('summary', '')).strip()
             if previous_summary:
                 parsed['summary'] = f"{summary_text} {previous_summary}"

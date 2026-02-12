@@ -4,6 +4,7 @@ from rest_framework.test import APITestCase
 from unittest.mock import patch
 
 from .models import Diagnosis, Medication
+from .ml_models.med42_service import Med42ServiceCloud
 
 
 class DiagnosisMedicationIntegrationTests(APITestCase):
@@ -245,3 +246,52 @@ class HybridAnalysisEndpointTests(APITestCase):
         self.assertIn('event: status', stream_payload)
         self.assertIn('event: token', stream_payload)
         self.assertIn('event: done', stream_payload)
+
+
+class Med42CriticalPrioritizationTests(APITestCase):
+    def setUp(self):
+        self.service = Med42ServiceCloud(api_token='test-token')
+
+    def test_septic_shock_is_prioritized_and_comorbidities_remain_active(self):
+        symptoms = (
+            "Worsening confusion, generalized weakness, decreased urine output, productive cough with yellow sputum, "
+            "fever 39.4 C, BP 82/48, HR 124, RR 26, SpO2 89, known type 2 diabetes and hypertension."
+        )
+        notes = (
+            "Lethargic and disoriented. Lactate 5.8 mmol/L, WBC 19,500/uL, creatinine 2.6 mg/dL, "
+            "glucose 312 mg/dL, HbA1c 9.8%, "
+            "urinalysis positive leukocyte esterase and nitrites with >100 WBC/hpf, "
+            "chest X-ray reveals right lower lobe consolidation."
+        )
+        parsed = {
+            'diagnoses': [
+                {'term': 'Uncontrolled type 2 diabetes mellitus', 'score': 0.90},
+                {'term': 'Hypertension with renal impairment', 'score': 0.84},
+                {'term': 'Pneumonia', 'score': 0.80},
+            ],
+            'confidence_score': 0.40,
+            'interpretation': 'Low confidence',
+            'recommendations': [],
+            'doctor_actions': [],
+            'summary': '',
+        }
+
+        self.service._apply_multimorbidity_adjustments(parsed, symptoms, notes)
+
+        self.assertTrue(parsed.get('active_diagnoses'))
+        self.assertIn('septic shock', parsed['active_diagnoses'][0].lower())
+        self.assertIn('septic shock', parsed['diagnoses'][0]['term'].lower())
+        self.assertTrue(
+            any('uncontrolled type 2 diabetes mellitus' in term.lower() for term in parsed['active_diagnoses'])
+        )
+        self.assertTrue(
+            any('hypertension with renal impairment' in term.lower() for term in parsed['active_diagnoses'])
+        )
+        self.assertGreaterEqual(parsed['confidence_score'], 0.86)
+
+    def test_numeric_parser_accepts_comma_separated_values(self):
+        value = self.service._extract_numeric_value(
+            'WBC 19,500/uL',
+            [r'\b(?:wbc|white blood cell(?: count)?)\s*(?:of|=|:)?\s*([0-9]{1,3}(?:,\d{3})?(?:\.\d+)?)'],
+        )
+        self.assertEqual(value, 19500.0)
