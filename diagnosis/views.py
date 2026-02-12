@@ -5,9 +5,10 @@ from rest_framework.renderers import BaseRenderer
 from django.http import StreamingHttpResponse
 from django.utils import timezone
 from django.contrib.auth.models import User
-from .models import Diagnosis, Medication
+from .models import ClinicalFeedback, Diagnosis, Medication
 from .serializers import DiagnosisSerializer, MedicationSerializer
 from .services.hybrid_orchestrator import hybrid_orchestrator
+from .services.medication_safety import MedicationSafetyEngine
 import json
 import traceback
 
@@ -29,6 +30,7 @@ class ServerSentEventRenderer(BaseRenderer):
 class DiagnosisViewSet(viewsets.ModelViewSet):
     queryset = Diagnosis.objects.all()
     serializer_class = DiagnosisSerializer
+    medication_safety_engine = MedicationSafetyEngine()
     
     def get_queryset(self):
         """Filter diagnoses by query parameters"""
@@ -42,6 +44,139 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(patient_id=patient_id)
             
         return queryset
+
+    def _normalize_text(self, value: str) -> str:
+        return ' '.join(str(value or '').lower().split())
+
+    def _diagnosis_match(self, left: str, right: str) -> bool:
+        l = self._normalize_text(left)
+        r = self._normalize_text(right)
+        if not l or not r:
+            return False
+        return l == r or l in r or r in l
+
+    def _serialize_ai_medications(self, ai_prediction: dict) -> list:
+        if not isinstance(ai_prediction, dict):
+            return []
+        meds = ai_prediction.get('medications', [])
+        serialized = []
+        if not isinstance(meds, list):
+            return serialized
+        for med in meds[:8]:
+            if not isinstance(med, dict):
+                continue
+            serialized.append(
+                {
+                    'medication_name': str(
+                        med.get('medication_name')
+                        or med.get('name')
+                        or ''
+                    ).strip(),
+                    'dosage': str(med.get('dosage', '')).strip(),
+                    'frequency': str(med.get('frequency', '')).strip(),
+                    'duration': str(med.get('duration', '')).strip(),
+                    'instructions': str(med.get('instructions', '')).strip(),
+                }
+            )
+        return serialized
+
+    def _serialize_doctor_medications(self, diagnosis: Diagnosis) -> list:
+        meds = diagnosis.medications.all()[:12]
+        serialized = []
+        for med in meds:
+            serialized.append(
+                {
+                    'medication_name': med.medication_name,
+                    'dosage': med.dosage,
+                    'frequency': med.frequency,
+                    'duration': med.duration,
+                    'instructions': med.instructions,
+                }
+            )
+        return serialized
+
+    def _update_medication_safety_snapshot(self, diagnosis: Diagnosis) -> None:
+        ai_prediction = diagnosis.ai_prediction if isinstance(diagnosis.ai_prediction, dict) else {}
+        medications = self._serialize_doctor_medications(diagnosis) or self._serialize_ai_medications(ai_prediction)
+        context = f"{diagnosis.symptoms}\n{diagnosis.clinical_notes}".strip()
+        medication_safety = self.medication_safety_engine.assess(medications, context)
+        ai_prediction['medication_safety'] = medication_safety
+        diagnosis.ai_prediction = ai_prediction
+        diagnosis.save(update_fields=['ai_prediction', 'updated_at'])
+
+    def _capture_feedback_entry(self, diagnosis: Diagnosis, source_action: str, feedback_note: str = '') -> None:
+        ai_prediction = diagnosis.ai_prediction if isinstance(diagnosis.ai_prediction, dict) else {}
+        if not ai_prediction:
+            return
+
+        ai_suggested = []
+        for item in ai_prediction.get('suggested_diagnoses', [])[:6]:
+            if not isinstance(item, dict):
+                continue
+            term = str(item.get('term', '')).strip()
+            if term:
+                ai_suggested.append(term)
+
+        ai_primary = ai_suggested[0] if ai_suggested else ''
+        doctor_final = str(diagnosis.diagnosis_text or '').strip()
+        if not doctor_final:
+            return
+
+        ai_medications = self._serialize_ai_medications(ai_prediction)
+        doctor_medications = self._serialize_doctor_medications(diagnosis)
+
+        ai_med_names = sorted(
+            {
+                self._normalize_text(med.get('medication_name', ''))
+                for med in ai_medications
+                if med.get('medication_name')
+            }
+        )
+        doctor_med_names = sorted(
+            {
+                self._normalize_text(med.get('medication_name', ''))
+                for med in doctor_medications
+                if med.get('medication_name')
+            }
+        )
+        diagnosis_changed = bool(ai_primary) and not self._diagnosis_match(ai_primary, doctor_final)
+        medications_changed = ai_med_names != doctor_med_names
+
+        correction_flags = []
+        if diagnosis_changed:
+            correction_flags.append('diagnosis_changed')
+        else:
+            correction_flags.append('diagnosis_confirmed')
+        if medications_changed:
+            correction_flags.append('medications_changed')
+        if feedback_note.strip():
+            correction_flags.append('doctor_note_added')
+
+        summary_parts = []
+        if diagnosis_changed:
+            summary_parts.append(f"Doctor changed AI diagnosis from '{ai_primary or 'n/a'}' to '{doctor_final}'.")
+        else:
+            summary_parts.append('Doctor kept AI primary diagnosis.')
+        if medications_changed:
+            summary_parts.append('Doctor adjusted medication plan.')
+        elif doctor_med_names:
+            summary_parts.append('Medication plan remained aligned with AI suggestions.')
+        if feedback_note.strip():
+            summary_parts.append(f"Doctor note: {feedback_note.strip()[:240]}")
+
+        ClinicalFeedback.objects.create(
+            diagnosis=diagnosis,
+            source_action=source_action,
+            symptom_signature=(diagnosis.symptoms or '')[:1200],
+            ai_primary_diagnosis=ai_primary[:255],
+            doctor_final_diagnosis=doctor_final[:255],
+            ai_suggested_diagnoses=ai_suggested,
+            ai_medications=ai_medications,
+            doctor_medications=doctor_medications,
+            correction_flags=correction_flags,
+            correction_summary=' '.join(summary_parts)[:1500],
+            feedback_note=feedback_note.strip()[:1000],
+        )
     
     @action(detail=False, methods=['post'])
     def analyze_symptoms(self, request):
@@ -139,6 +274,8 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         """Create diagnosis with enhanced error handling and automatic doctor assignment"""
         try:
+            feedback_note = str(request.data.get('feedback_note', '')).strip()
+
             # Get or create a default doctor user if not provided
             doctor_id = request.data.get('doctor')
             if not doctor_id:
@@ -171,6 +308,14 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
                     )
                     data = request.data.copy()
                     data['doctor'] = default_user.id
+
+            if isinstance(data, dict):
+                data.pop('feedback_note', None)
+            else:
+                try:
+                    data.pop('feedback_note')
+                except Exception:
+                    pass
             
             # Log incoming data for debugging
             print("Creating diagnosis with data:", data)
@@ -178,6 +323,10 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
             serializer = self.get_serializer(data=data)
             serializer.is_valid(raise_exception=True)
             self.perform_create(serializer)
+            diagnosis = serializer.instance
+            if diagnosis is not None:
+                self._update_medication_safety_snapshot(diagnosis)
+                self._capture_feedback_entry(diagnosis, source_action='create', feedback_note=feedback_note)
             
             headers = self.get_success_headers(serializer.data)
             return Response(
@@ -197,6 +346,7 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
     def approve(self, request, pk=None):
         """Approve a diagnosis"""
         diagnosis = self.get_object()
+        feedback_note = str(request.data.get('feedback_note', '')).strip()
         
         if diagnosis.status == 'approved':
             return Response(
@@ -207,6 +357,8 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
         diagnosis.status = 'approved'
         diagnosis.approved_at = timezone.now()
         diagnosis.save()
+        self._update_medication_safety_snapshot(diagnosis)
+        self._capture_feedback_entry(diagnosis, source_action='approve', feedback_note=feedback_note)
         
         serializer = self.get_serializer(diagnosis)
         return Response({
@@ -233,6 +385,7 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
     def update_diagnosis(self, request, pk=None):
         """Update diagnosis details including medications"""
         diagnosis = self.get_object()
+        feedback_note = str(request.data.get('feedback_note', '')).strip()
         
         # Only allow updating these fields
         allowed_fields = ['diagnosis_text', 'clinical_notes', 'medications']
@@ -241,6 +394,10 @@ class DiagnosisViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(diagnosis, data=update_data, partial=True)
         if serializer.is_valid():
             serializer.save()
+            updated = serializer.instance
+            if updated is not None:
+                self._update_medication_safety_snapshot(updated)
+                self._capture_feedback_entry(updated, source_action='update', feedback_note=feedback_note)
             return Response(serializer.data)
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

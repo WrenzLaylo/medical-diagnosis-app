@@ -2,10 +2,11 @@ import hashlib
 import os
 import re
 import time
-from typing import Any, Dict, Generator, List
+from typing import Any, Dict, Generator, List, Tuple
 
 from diagnosis.ml_models.med42_service import med42_service
 
+from .medication_safety import MedicationSafetyEngine
 from .watsonx_validator import WatsonxValidator
 
 
@@ -14,8 +15,11 @@ class HybridDiagnosisOrchestrator:
 
     def __init__(self) -> None:
         self.validator = WatsonxValidator()
+        self.medication_safety = MedicationSafetyEngine()
         self.cache_ttl_seconds = int(os.environ.get('HYBRID_CACHE_TTL_SECONDS', '300'))
         self.cache_max_items = int(os.environ.get('HYBRID_CACHE_MAX_ITEMS', '128'))
+        self.feedback_hint_window = int(os.environ.get('HYBRID_FEEDBACK_HINT_WINDOW', '180'))
+        self.feedback_hint_limit = int(os.environ.get('HYBRID_FEEDBACK_HINT_LIMIT', '3'))
         self._cache: Dict[str, Dict[str, Any]] = {}
 
     def analyze(self, symptoms: str, clinical_notes: str = '') -> Dict[str, Any]:
@@ -58,8 +62,21 @@ class HybridDiagnosisOrchestrator:
         yield {'event': 'status', 'data': {'stage': 'intake', 'message': 'Analyzing symptoms...'}}
         patient_facts = self._build_patient_facts(symptoms, clinical_notes)
 
+        feedback_hints = self._fetch_feedback_hints(symptoms, clinical_notes)
+        model_notes = clinical_notes
+        if feedback_hints:
+            yield {
+                'event': 'status',
+                'data': {
+                    'stage': 'feedback',
+                    'message': f'Applying {len(feedback_hints)} doctor feedback hint(s)...',
+                },
+            }
+            model_notes = self._append_feedback_hints_to_notes(clinical_notes, feedback_hints)
+            patient_facts['feedback_hints'] = [hint.get('summary', '') for hint in feedback_hints]
+
         yield {'event': 'status', 'data': {'stage': 'red_flags', 'message': 'Checking red flags...'}}
-        med42_result = self._run_med42(symptoms, clinical_notes)
+        med42_result = self._run_med42(symptoms, model_notes)
 
         if med42_result.get('error'):
             error_text = str(med42_result.get('error')).strip() or 'Primary model analysis failed'
@@ -112,8 +129,14 @@ class HybridDiagnosisOrchestrator:
             'data': {'stage': 'format', 'message': 'Formatting final clinical output...'},
         }
 
-        standardized = self._standardize_output(med42_result, validator_result)
-        compatibility = self._build_compatibility_output(standardized, med42_result, validator_result, patient_facts)
+        standardized = self._standardize_output(med42_result, validator_result, patient_facts)
+        compatibility = self._build_compatibility_output(
+            standardized,
+            med42_result,
+            validator_result,
+            patient_facts,
+            feedback_hints,
+        )
 
         payload = {
             'result': standardized,
@@ -252,6 +275,7 @@ class HybridDiagnosisOrchestrator:
         self,
         med42_result: Dict[str, Any],
         validator_result: Dict[str, Any],
+        patient_facts: Dict[str, Any],
     ) -> Dict[str, Any]:
         suggested = med42_result.get('suggested_diagnoses', [])
         primary = ''
@@ -311,6 +335,29 @@ class HybridDiagnosisOrchestrator:
         validator_output = validator_result.get('standardized_output')
         if isinstance(validator_output, dict):
             standardized = self._merge_validator_output(standardized, validator_output)
+
+        medication_context = ' '.join(
+            self._clean_strings(
+                patient_facts.get('sx', []) + [patient_facts.get('notes', '')],
+                limit=18,
+            )
+        )
+        medication_safety = self.medication_safety.assess(standardized.get('medications', []), medication_context)
+        standardized['medication_safety'] = medication_safety
+
+        safety_issues = standardized.get('safety_assessment', {}).get('issues', [])
+        for alert in medication_safety.get('alerts', [])[:6]:
+            if alert.get('severity') not in ['high', 'moderate']:
+                continue
+            issue_text = (
+                f"{alert.get('medication', 'Medication')}: {alert.get('issue', '')} "
+                f"Recommendation: {alert.get('recommendation', '')}"
+            ).strip()
+            if issue_text and issue_text not in safety_issues:
+                safety_issues.append(issue_text)
+        standardized['safety_assessment']['issues'] = self._clean_strings(safety_issues, limit=8)
+        if medication_safety.get('overall_risk') == 'high':
+            standardized['safety_assessment']['passed'] = False
 
         return standardized
 
@@ -380,6 +427,7 @@ class HybridDiagnosisOrchestrator:
         med42_result: Dict[str, Any],
         validator_result: Dict[str, Any],
         patient_facts: Dict[str, Any],
+        feedback_hints: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         differential = standardized.get('differential_diagnoses', [])
         suggested = []
@@ -434,6 +482,13 @@ class HybridDiagnosisOrchestrator:
                 else 'Primary model output'
             )
 
+        explainability = self._build_explainability(standardized, med42_result, patient_facts)
+        feedback_info = {
+            'used_hints': bool(feedback_hints),
+            'hint_count': len(feedback_hints),
+            'hints': [hint.get('summary', '') for hint in feedback_hints[:3]],
+        }
+
         return {
             'confidence_score': standardized.get('confidence_score', 0.0),
             'suggested_diagnoses': suggested,
@@ -449,6 +504,9 @@ class HybridDiagnosisOrchestrator:
                 {'has_red_flags': False, 'urgency_level': 'UNKNOWN', 'detected_flags': []},
             ),
             'validation_warning': '; '.join(warnings) if warnings else None,
+            'medication_safety': standardized.get('medication_safety', {}),
+            'explainability': explainability,
+            'feedback_loop_info': feedback_info,
             'validator_info': {
                 'validator_status': validator_result.get('validator_status', 'skipped'),
                 'safety_passed': standardized.get('safety_assessment', {}).get('passed', True),
@@ -456,6 +514,183 @@ class HybridDiagnosisOrchestrator:
                 'hallucination_flags': standardized.get('hallucination_flags', []),
             },
         }
+
+    def _build_explainability(
+        self,
+        standardized: Dict[str, Any],
+        med42_result: Dict[str, Any],
+        patient_facts: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        features = self._clean_strings(
+            med42_result.get('keywords', []) + patient_facts.get('sx', []),
+            limit=16,
+        )
+        workup_items = self._clean_strings(standardized.get('recommended_workup', []), limit=6)
+        confidence_score = self._safe_confidence(standardized.get('confidence_score', 0))
+        confidence_percent = int(confidence_score * 100)
+        differentials = self._clean_strings(standardized.get('differential_diagnoses', []), limit=5)
+
+        confidence_drivers: List[str] = []
+        uncertainty_factors: List[str] = []
+        missing_data: List[str] = []
+
+        if differentials:
+            confidence_drivers.append(f"Primary diagnosis ranked #1 among {len(differentials)} differential candidates.")
+        if len(features) >= 3:
+            confidence_drivers.append(f"{len(features)} relevant clinical features were detected from symptoms/notes.")
+        if standardized.get('red_flags'):
+            confidence_drivers.append("Red-flag screening was applied before final ranking.")
+        if standardized.get('medication_safety', {}).get('overall_risk') == 'low':
+            confidence_drivers.append("Medication safety check found no major conflicts for current suggestions.")
+
+        if confidence_score < 0.75:
+            uncertainty_factors.append("Confidence is moderate and should be confirmed with objective workup.")
+        if workup_items:
+            uncertainty_factors.append("Confirmatory tests are still pending.")
+            missing_data.extend([f"Pending: {item}" for item in workup_items[:4]])
+        if standardized.get('safety_assessment', {}).get('issues'):
+            uncertainty_factors.append("Safety review reported issues requiring clinician review.")
+
+        diagnosis_evidence: List[Dict[str, Any]] = []
+        feature_lower = [item.lower() for item in features]
+        for index, diagnosis in enumerate(differentials):
+            support = self._diagnosis_support_features(diagnosis, features, feature_lower)
+            against: List[str] = []
+            if index > 0:
+                against.append("Lower-ranked than primary diagnosis on current evidence.")
+            if index == 0 and workup_items:
+                against.append("Primary diagnosis still needs confirmatory objective testing.")
+
+            diagnosis_evidence.append(
+                {
+                    'rank': index + 1,
+                    'diagnosis': diagnosis,
+                    'supporting_evidence': support,
+                    'against_evidence': against,
+                    'missing_data': [f"Need: {item}" for item in workup_items[:2]],
+                }
+            )
+
+        return {
+            'confidence_breakdown': {
+                'score': confidence_score,
+                'percent': confidence_percent,
+                'drivers': self._clean_strings(confidence_drivers, limit=6),
+                'uncertainty_factors': self._clean_strings(uncertainty_factors, limit=6),
+                'missing_data': self._clean_strings(missing_data, limit=6),
+            },
+            'diagnosis_evidence': diagnosis_evidence,
+        }
+
+    def _diagnosis_support_features(
+        self,
+        diagnosis: str,
+        features: List[str],
+        feature_lower: List[str],
+    ) -> List[str]:
+        diagnosis_lower = diagnosis.lower()
+
+        diagnosis_feature_hints = {
+            'pneumonia': ['fever', 'cough', 'dyspnea', 'chest pain'],
+            'influenza': ['fever', 'body aches', 'headache', 'sore throat'],
+            'tuberculosis': ['chronic cough', 'hemoptysis', 'weight loss', 'night sweats'],
+            'depress': ['depressed mood', 'anhedonia', 'insomnia', 'suicidal ideation'],
+            'mccune': ['precocious puberty', 'cafe-au-lait spots', 'fibrous dysplasia'],
+            'urinary': ['dysuria', 'frequency', 'urgency', 'flank pain'],
+            'asthma': ['dyspnea', 'wheezing', 'cough'],
+        }
+
+        expected_terms: List[str] = []
+        for token, terms in diagnosis_feature_hints.items():
+            if token in diagnosis_lower:
+                expected_terms.extend(terms)
+
+        supporting: List[str] = []
+        for idx, item in enumerate(feature_lower):
+            if len(supporting) >= 3:
+                break
+            if expected_terms and not any(term in item for term in expected_terms):
+                continue
+            supporting.append(features[idx])
+
+        if not supporting:
+            supporting = features[: min(3, len(features))]
+
+        if not supporting:
+            supporting = ['Limited explicit feature extraction; correlate with full clinical context.']
+
+        return supporting
+
+    def _fetch_feedback_hints(self, symptoms: str, clinical_notes: str) -> List[Dict[str, Any]]:
+        try:
+            from diagnosis.models import ClinicalFeedback
+        except Exception:
+            return []
+
+        query_text = re.sub(r'\s+', ' ', f"{symptoms} {clinical_notes}".strip().lower())
+        if not query_text:
+            return []
+
+        tokens = {
+            token
+            for token in re.findall(r'[a-z0-9]{4,}', query_text)
+            if token not in {'with', 'without', 'history', 'patient', 'pain', 'days', 'week'}
+        }
+        if not tokens:
+            return []
+
+        recent_feedback = list(
+            ClinicalFeedback.objects.all()
+            .order_by('-created_at')[: self.feedback_hint_window]
+        )
+        scored: List[Tuple[float, Dict[str, Any]]] = []
+        for item in recent_feedback:
+            reference_text = re.sub(
+                r'\s+',
+                ' ',
+                f"{item.symptom_signature} {item.ai_primary_diagnosis} {item.doctor_final_diagnosis} {item.correction_summary}".lower(),
+            )
+            if not reference_text:
+                continue
+            reference_tokens = set(re.findall(r'[a-z0-9]{4,}', reference_text))
+            if not reference_tokens:
+                continue
+            overlap = tokens.intersection(reference_tokens)
+            if not overlap:
+                continue
+
+            score = len(overlap) / max(1, len(tokens))
+            summary = (
+                f"Past correction: AI '{item.ai_primary_diagnosis or 'n/a'}' -> "
+                f"Doctor '{item.doctor_final_diagnosis or 'n/a'}'."
+            )
+            if item.correction_summary:
+                summary = f"{summary} {item.correction_summary[:180]}"
+
+            scored.append(
+                (
+                    score,
+                    {
+                        'summary': summary,
+                        'score': round(score, 3),
+                        'feedback_note': item.feedback_note[:180],
+                    },
+                )
+            )
+
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [payload for _, payload in scored[: self.feedback_hint_limit]]
+
+    def _append_feedback_hints_to_notes(self, clinical_notes: str, feedback_hints: List[Dict[str, Any]]) -> str:
+        hint_lines = [item.get('summary', '').strip() for item in feedback_hints if item.get('summary')]
+        if not hint_lines:
+            return clinical_notes
+        feedback_block = "Doctor feedback memory (use as calibration hints, not hard constraints):\n- " + "\n- ".join(
+            hint_lines[:3]
+        )
+        if clinical_notes:
+            return f"{clinical_notes}\n\n{feedback_block}"
+        return feedback_block
 
     def _render_reasoning_text(self, standardized: Dict[str, Any]) -> str:
         lines: List[str] = []
@@ -723,6 +958,7 @@ class HybridDiagnosisOrchestrator:
             'red_flags': [],
             'recommended_workup': [],
             'medications': [],
+            'medication_safety': {'overall_risk': 'low', 'requires_review': False, 'alerts': [], 'per_medication': []},
             'confidence_score': 0.0,
             'safety_assessment': {'passed': False, 'issues': [error_text]},
             'validator_notes': 'analysis failed',
@@ -742,6 +978,18 @@ class HybridDiagnosisOrchestrator:
             'summary': '',
             'recommendations': [],
             'medications': [],
+            'medication_safety': {'overall_risk': 'low', 'requires_review': False, 'alerts': [], 'per_medication': []},
+            'explainability': {
+                'confidence_breakdown': {
+                    'score': 0.0,
+                    'percent': 0,
+                    'drivers': [],
+                    'uncertainty_factors': [error_text],
+                    'missing_data': [],
+                },
+                'diagnosis_evidence': [],
+            },
+            'feedback_loop_info': {'used_hints': False, 'hint_count': 0, 'hints': []},
             'red_flag_analysis': {'has_red_flags': False, 'urgency_level': 'UNKNOWN', 'detected_flags': []},
             'validation_warning': error_text,
             'validator_info': {

@@ -97,8 +97,8 @@ export const diagnosisAPI = {
   updateDiagnosis: (id: number, data: any) => 
     api.patch(`/diagnoses/${id}/update_diagnosis/`, data),
   
-  approveDiagnosis: (id: number) => 
-    api.post(`/diagnoses/${id}/approve/`),
+  approveDiagnosis: (id: number, data: any = {}) => 
+    api.post(`/diagnoses/${id}/approve/`, data),
   
   analyzeSymptoms: (data: { symptoms: string; clinical_notes?: string }) => 
     api.post('/diagnoses/analyze_symptoms/', data),

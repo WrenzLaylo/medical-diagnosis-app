@@ -58,3 +58,31 @@ class Medication(models.Model):
     
     def __str__(self):
         return f"{self.medication_name} for {self.diagnosis.patient_name}"
+
+
+class ClinicalFeedback(models.Model):
+    SOURCE_ACTION_CHOICES = [
+        ('create', 'Created Diagnosis'),
+        ('update', 'Updated Diagnosis'),
+        ('approve', 'Approved Diagnosis'),
+    ]
+
+    diagnosis = models.ForeignKey(Diagnosis, on_delete=models.CASCADE, related_name='feedback_entries')
+    source_action = models.CharField(max_length=20, choices=SOURCE_ACTION_CHOICES, default='update')
+    symptom_signature = models.TextField(blank=True)
+    ai_primary_diagnosis = models.CharField(max_length=255, blank=True)
+    doctor_final_diagnosis = models.CharField(max_length=255, blank=True)
+    ai_suggested_diagnoses = models.JSONField(default=list, blank=True)
+    ai_medications = models.JSONField(default=list, blank=True)
+    doctor_medications = models.JSONField(default=list, blank=True)
+    correction_flags = models.JSONField(default=list, blank=True)
+    correction_summary = models.TextField(blank=True)
+    feedback_note = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        diagnosis_text = self.doctor_final_diagnosis or 'No final diagnosis'
+        return f"Feedback #{self.id} - {diagnosis_text[:50]}"

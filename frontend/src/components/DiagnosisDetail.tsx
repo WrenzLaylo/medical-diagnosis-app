@@ -39,6 +39,38 @@ interface Diagnosis {
         severity: string;
       }>;
     };
+    medication_safety?: {
+      overall_risk: 'low' | 'moderate' | 'high';
+      requires_review: boolean;
+      alerts?: Array<{
+        severity: 'low' | 'moderate' | 'high';
+        medication: string;
+        code: string;
+        issue: string;
+        recommendation: string;
+      }>;
+    };
+    explainability?: {
+      confidence_breakdown?: {
+        score: number;
+        percent: number;
+        drivers: string[];
+        uncertainty_factors: string[];
+        missing_data: string[];
+      };
+      diagnosis_evidence?: Array<{
+        rank: number;
+        diagnosis: string;
+        supporting_evidence: string[];
+        against_evidence: string[];
+        missing_data: string[];
+      }>;
+    };
+    feedback_loop_info?: {
+      used_hints: boolean;
+      hint_count: number;
+      hints: string[];
+    };
   };
   medications?: Array<{
     id?: number;
@@ -131,6 +163,7 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
 
   const [isEditing, setIsEditing] = useState(false);
   const [editedDiagnosis, setEditedDiagnosis] = useState(initialState);
+  const [feedbackNote, setFeedbackNote] = useState('');
 
   const handleMedicationFieldChange = (
     localId: number,
@@ -161,6 +194,7 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
 
   const handleCancel = () => {
     setEditedDiagnosis(initialState);
+    setFeedbackNote('');
     setIsEditing(false);
   };
 
@@ -225,8 +259,10 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
         diagnosis_text: editedDiagnosis.diagnosis_text,
         clinical_notes: editedDiagnosis.clinical_notes,
         medications: medicationsPayload,
+        feedback_note: feedbackNote.trim(),
       });
       alert('Diagnosis updated successfully');
+      setFeedbackNote('');
       setIsEditing(false);
       onClose();
     } catch (error) {
@@ -238,8 +274,9 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
   const handleApprove = async () => {
     if (window.confirm('Are you sure you want to approve this diagnosis?')) {
       try {
-        await diagnosisAPI.approveDiagnosis(diagnosis.id);
+        await diagnosisAPI.approveDiagnosis(diagnosis.id, { feedback_note: feedbackNote.trim() });
         alert('Diagnosis approved successfully');
+        setFeedbackNote('');
         onClose();
       } catch (error) {
         console.error('Error approving diagnosis:', error);
@@ -442,6 +479,76 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
                   </ul>
                 </div>
               )}
+
+              {diagnosis.ai_prediction.medication_safety && (
+                <div
+                  className={`rounded p-3 border ${
+                    diagnosis.ai_prediction.medication_safety.overall_risk === 'high'
+                      ? 'bg-red-50 border-red-200'
+                      : diagnosis.ai_prediction.medication_safety.overall_risk === 'moderate'
+                      ? 'bg-amber-50 border-amber-200'
+                      : 'bg-emerald-50 border-emerald-200'
+                  }`}
+                >
+                  <p className="text-xs font-semibold text-gray-900 mb-1">Medication Safety Engine</p>
+                  <p className="text-xs text-gray-700">
+                    Risk:{' '}
+                    <span className="font-semibold uppercase">
+                      {diagnosis.ai_prediction.medication_safety.overall_risk}
+                    </span>
+                    {diagnosis.ai_prediction.medication_safety.requires_review
+                      ? ' (review recommended)'
+                      : ' (no major conflicts detected)'}
+                  </p>
+                  {diagnosis.ai_prediction.medication_safety.alerts &&
+                    diagnosis.ai_prediction.medication_safety.alerts.length > 0 && (
+                      <ul className="mt-2 space-y-1">
+                        {diagnosis.ai_prediction.medication_safety.alerts.map((alert, idx) => (
+                          <li key={`${alert.code}-${idx}`} className="text-xs text-gray-800">
+                            - [{alert.severity.toUpperCase()}] {alert.medication}: {alert.issue} {alert.recommendation}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                </div>
+              )}
+
+              {diagnosis.ai_prediction.explainability && (
+                <div className="bg-white border border-gray-200 rounded p-3 space-y-3">
+                  <p className="text-xs font-semibold text-gray-800">Explainability</p>
+                  {(diagnosis.ai_prediction.explainability.confidence_breakdown?.drivers?.length ?? 0) > 0 && (
+                    <div>
+                      <p className="text-xs font-medium text-gray-700 mb-1">Confidence Drivers</p>
+                      <ul className="space-y-1">
+                        {(diagnosis.ai_prediction.explainability.confidence_breakdown?.drivers || []).map((driver, idx) => (
+                          <li key={idx} className="text-xs text-gray-700">- {driver}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {(diagnosis.ai_prediction.explainability.confidence_breakdown?.uncertainty_factors?.length ?? 0) > 0 && (
+                    <div>
+                      <p className="text-xs font-medium text-gray-700 mb-1">Uncertainty Factors</p>
+                      <ul className="space-y-1">
+                        {(diagnosis.ai_prediction.explainability.confidence_breakdown?.uncertainty_factors || []).map((item, idx) => (
+                          <li key={idx} className="text-xs text-gray-700">- {item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {diagnosis.ai_prediction.feedback_loop_info && (
+                <div className="bg-indigo-50 border border-indigo-200 rounded p-3">
+                  <p className="text-xs font-semibold text-indigo-900 mb-1">Feedback Learning Loop</p>
+                  <p className="text-xs text-indigo-800">
+                    {diagnosis.ai_prediction.feedback_loop_info.used_hints
+                      ? `Applied ${diagnosis.ai_prediction.feedback_loop_info.hint_count} similar doctor correction hint(s) for this case.`
+                      : 'No prior matching doctor corrections were applied for this case.'}
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
@@ -463,6 +570,19 @@ const DiagnosisDetail: React.FC<DiagnosisDetailProps> = ({ diagnosis, onClose })
               <p className="text-sm text-gray-800 whitespace-pre-wrap">{diagnosis.diagnosis_text}</p>
             )}
           </div>
+
+          {(isEditing || diagnosis.status !== 'approved') && (
+            <div className="bg-white border border-gray-200 rounded p-4">
+              <label className="label">AI Feedback Note (Optional)</label>
+              <textarea
+                value={feedbackNote}
+                onChange={(e) => setFeedbackNote(e.target.value)}
+                rows={3}
+                className="w-full input-field resize-none"
+                placeholder="Why you accepted/changed the AI diagnosis or medications. This feeds future calibration."
+              />
+            </div>
+          )}
 
           <div className="space-y-3">
             <div className="flex items-center justify-between">

@@ -309,7 +309,37 @@ Constraints:
                 ],
                 'may_have': ['weight_loss', 'guilt', 'hopelessness'],
                 'should_not_have': ['manic_symptoms'],
-            }
+            },
+            'mccune_albright_syndrome': {
+                'required': ['precocious_puberty', 'cafe_au_lait_spots', 'fibrous_dysplasia'],
+                'typical': ['endocrine_hyperfunction', 'bone_pain', 'fractures'],
+                'may_have': ['vaginal_bleeding', 'testicular_enlargement', 'thyrotoxicosis'],
+                'should_not_have': [],
+            },
+            'peripheral_precocious_puberty': {
+                'required': ['precocious_puberty'],
+                'typical': ['advanced_bone_age', 'vaginal_bleeding', 'testicular_enlargement'],
+                'may_have': ['ovarian_cyst', 'adrenal_source'],
+                'should_not_have': [],
+            },
+            'central_precocious_puberty': {
+                'required': ['precocious_puberty'],
+                'typical': ['advanced_bone_age', 'growth_acceleration'],
+                'may_have': ['headache', 'visual_changes'],
+                'should_not_have': [],
+            },
+            'neurofibromatosis_type_1': {
+                'required': ['cafe_au_lait_spots'],
+                'typical': ['axillary_freckling', 'neurofibromas', 'lisch_nodules'],
+                'may_have': ['optic_pathway_glioma', 'learning_difficulties'],
+                'should_not_have': [],
+            },
+            'fibrous_dysplasia': {
+                'required': ['fibrous_dysplasia'],
+                'typical': ['bone_pain', 'fractures', 'bone_deformity'],
+                'may_have': ['limp', 'facial_asymmetry'],
+                'should_not_have': [],
+            },
         }
 
     def _initialize_medication_protocols(self) -> Dict[str, List[Dict[str, str]]]:
@@ -406,6 +436,11 @@ Constraints:
             'influenza_like_illness': 'Influenza-like illness',
             'viral_upper_respiratory_infection': 'Viral upper respiratory infection',
             'major_depressive_episode': 'Major depressive episode',
+            'mccune_albright_syndrome': 'McCune-Albright syndrome',
+            'peripheral_precocious_puberty': 'Peripheral precocious puberty',
+            'central_precocious_puberty': 'Central precocious puberty',
+            'neurofibromatosis_type_1': 'Neurofibromatosis type 1 (NF1)',
+            'fibrous_dysplasia': 'Fibrous dysplasia',
         }
         if condition in aliases:
             return aliases[condition]
@@ -416,6 +451,10 @@ Constraints:
         normalized = diagnosis.lower().strip()
         normalized = normalized.replace('tuberculosis', 'tb')
         normalized = normalized.replace('pulmonary tuberculosis', 'pulmonary tb')
+        normalized = normalized.replace('mccune albright', 'mccune albright syndrome')
+        normalized = normalized.replace('mccune-albright', 'mccune albright syndrome')
+        normalized = normalized.replace('nf1', 'neurofibromatosis type 1')
+        normalized = normalized.replace('familial adenomatous polyposis', 'fap')
         normalized = re.sub(r'[^a-z0-9\s]', ' ', normalized)
         normalized = re.sub(r'\s+', ' ', normalized).strip()
         return normalized
@@ -591,6 +630,111 @@ Constraints:
                 break
 
         return deduped
+
+    def _merge_unique_strings(self, primary: List[str], secondary: List[str], limit: int = 8) -> List[str]:
+        merged: List[str] = []
+        seen = set()
+        for source in (primary, secondary):
+            for item in source:
+                value = re.sub(r'\s+', ' ', str(item or '').strip())
+                if not value:
+                    continue
+                key = value.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(value)
+                if len(merged) >= limit:
+                    return merged
+        return merged
+
+    def _has_mccune_albright_triad(self, combined_text: str) -> bool:
+        required_features = ['precocious puberty', 'cafe au lait spots', 'fibrous dysplasia']
+        return all(self._feature_present(feature, combined_text) for feature in required_features)
+
+    def _refine_rare_endocrine_pattern(
+        self,
+        parsed: Dict[str, Any],
+        symptoms_text: str,
+        clinical_notes: str,
+    ) -> None:
+        combined_text = f"{symptoms_text} {clinical_notes}".lower().strip()
+        if not combined_text:
+            return
+        if not self._has_mccune_albright_triad(combined_text):
+            return
+
+        blocked_terms = ['familial adenomatous polyposis', 'fap']
+        curated = [
+            ('McCune-Albright syndrome', 0.90),
+            ('Fibrous dysplasia (monostotic/polyostotic)', 0.68),
+            ('Peripheral precocious puberty (gonadotropin-independent)', 0.62),
+            ('Central precocious puberty', 0.55),
+            ('Neurofibromatosis type 1 (NF1)', 0.42),
+        ]
+
+        refined: List[Dict[str, Any]] = []
+        seen = set()
+        for term, score in curated:
+            key = self._canonical_diagnosis(term)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            refined.append({'term': term, 'score': score})
+
+        for item in parsed.get('diagnoses', []):
+            term = str(item.get('term', '')).strip()
+            if not term:
+                continue
+            lower_term = term.lower()
+            if any(blocked in lower_term for blocked in blocked_terms):
+                continue
+            if any(self._diagnoses_match(term, existing.get('term', '')) for existing in refined):
+                continue
+            key = self._canonical_diagnosis(term)
+            if not key or key in seen:
+                continue
+            try:
+                score = float(item.get('score', 0.40))
+            except (TypeError, ValueError):
+                score = 0.40
+            refined.append({'term': term, 'score': max(0.30, min(score, 0.88))})
+            seen.add(key)
+            if len(refined) >= 5:
+                break
+
+        parsed['diagnoses'] = refined[:5]
+        parsed['confidence_score'] = max(float(parsed.get('confidence_score', 0.0) or 0.0), 0.82)
+        parsed['interpretation'] = (
+            'Moderate-high confidence - classic triad supports McCune-Albright syndrome; confirm with focused endocrine and skeletal workup'
+        )
+
+        targeted_workup = [
+            'Urgent pediatric endocrinology referral; co-manage with orthopedics for fibrous dysplasia burden.',
+            'Endocrine panel: LH/FSH, estradiol/testosterone, DHEAS/17-hydroxyprogesterone, TSH/free T4, prolactin, IGF-1.',
+            'Bone age radiograph (left hand/wrist) and serial growth velocity/puberty staging.',
+            'Targeted pelvic/testicular ultrasound; evaluate adrenal source if androgen excess is suspected.',
+            'Skeletal imaging (X-ray/CT or MRI of symptomatic sites) to assess deformity and fracture risk.',
+            'GNAS mutation testing; consider tissue-based testing if blood testing is negative but clinical suspicion remains high.',
+        ]
+        parsed['recommendations'] = self._merge_unique_strings(targeted_workup, parsed.get('recommendations', []), limit=6)
+
+        parsed['doctor_actions'] = [
+            'Screen each visit for fracture risk, bone pain progression, visual/hearing symptoms, and neurologic deficits.',
+            'Avoid anchoring on isolated precocious puberty until endocrine and skeletal evaluation is completed.',
+            'Counsel family that mosaic disorders can have negative blood genetics; tissue testing may be needed.',
+            'Set close follow-up (4-8 weeks initially) to review growth trend, pubertal progression, and lab/imaging results.',
+        ]
+
+        prior_summary = str(parsed.get('summary', '')).strip()
+        focused_summary = (
+            'Clinical pattern is highly suggestive of McCune-Albright syndrome (precocious puberty + cafe-au-lait lesions + fibrous dysplasia). '
+            'Prioritize endocrine referral, bone-age/hormonal evaluation, and skeletal lesion staging; defer empiric endocrine therapy until specialist assessment.'
+        )
+        if prior_summary:
+            parsed['summary'] = f"{prior_summary} {focused_summary}"
+        else:
+            parsed['summary'] = focused_summary
 
     def _line_to_heading_key(self, line: str) -> str:
         """Normalize a line to a known section heading key when possible"""
@@ -811,6 +955,11 @@ Constraints:
             'poor concentration': ['difficulty concentrating', 'indecisiveness', 'poor focus'],
             'psychomotor retardation': ['slowed speech', 'slowed movements', 'psychomotor slowing'],
             'suicidal ideation': ['suicidal thoughts', 'thoughts of death', 'self harm', 'self-harm'],
+            'precocious puberty': ['early puberty', 'premature puberty', 'sexual precocity'],
+            'cafe au lait spots': ['cafe-au-lait spots', 'cafe au lait', 'light brown patches', 'hyperpigmented macules'],
+            'fibrous dysplasia': ['polyostotic fibrous dysplasia', 'monostotic fibrous dysplasia', 'bone fibrous dysplasia'],
+            'endocrine hyperfunction': ['hormonal hyperfunction', 'autonomous endocrine hyperfunction'],
+            'advanced bone age': ['bone age advancement', 'advanced skeletal age'],
             'gi symptoms': ['gastrointestinal symptoms', 'stomach problems', 'digestive issues', 
                            'gi issues', 'abdominal symptoms'],
             'abnormal bleeding': ['bleeding disorder', 'excessive bleeding', 'prolonged bleeding',
@@ -840,7 +989,13 @@ Constraints:
         # Check against known patterns
         matched_pattern = None
         for condition, pattern in self.symptom_clusters.items():
-            if condition in diagnosis_lower or diagnosis_lower in condition:
+            condition_phrase = condition.replace('_', ' ')
+            if (
+                condition in diagnosis_lower
+                or condition_phrase in diagnosis_lower
+                or diagnosis_lower in condition
+                or diagnosis_lower in condition_phrase
+            ):
                 matched_pattern = (condition, pattern)
                 break
         
@@ -1024,6 +1179,9 @@ Constraints:
                         parsed['interpretation'] = (
                             'Moderate-high confidence - severe depressive episode with suicide risk; urgent psychiatric care required'
                         )
+
+            # Step 5c: Refine specific rare-pattern cases for safer differentials and clinician guidance
+            self._refine_rare_endocrine_pattern(parsed, analysis_symptoms, analysis_notes)
             
             # Step 6: Normalize medications and apply fallback if safe
             parsed['medications'] = self._normalize_medications(parsed.get('medications', []))
@@ -1260,6 +1418,7 @@ Keep output concise, clinically actionable, and doctor-readable."""
             'recommendations': recommendations,
             'medications': medications,
             'summary': summary,
+            'doctor_actions': [],
         }
     
     def _extract_medications(self, response: str) -> List[Dict]:
@@ -1507,6 +1666,11 @@ Keep output concise, clinically actionable, and doctor-readable."""
             for rec in parsed['recommendations'][:6]:
                 lines.append(f"- {rec}")
 
+        if parsed.get('doctor_actions'):
+            lines.append("**DOCTOR ACTION CHECKLIST**")
+            for action in parsed['doctor_actions'][:5]:
+                lines.append(f"- {action}")
+
         lines.append("**MEDICATION RECOMMENDATIONS**")
         if parsed.get('medications'):
             for med in parsed['medications'][:5]:
@@ -1640,6 +1804,15 @@ Keep output concise, clinically actionable, and doctor-readable."""
             'thoughts of death': 'Suicidal Ideation',
             'self harm': 'Suicidal Ideation',
             'self-harm': 'Suicidal Ideation',
+            'precocious puberty': 'Precocious Puberty',
+            'early puberty': 'Precocious Puberty',
+            'premature puberty': 'Precocious Puberty',
+            'cafe au lait spots': 'Cafe-au-lait Spots',
+            'cafe-au-lait spots': 'Cafe-au-lait Spots',
+            'cafe au lait': 'Cafe-au-lait Spots',
+            'fibrous dysplasia': 'Fibrous Dysplasia',
+            'polyostotic fibrous dysplasia': 'Fibrous Dysplasia',
+            'monostotic fibrous dysplasia': 'Fibrous Dysplasia',
             'chills': 'Chills',
             'hypertension': 'Hypertension',
             'high blood pressure': 'Hypertension',
