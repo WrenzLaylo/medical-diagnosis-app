@@ -1,0 +1,6 @@
+Django==5.2.11
+django-cors-headers==4.9.0
+djangorestframework==3.16.1
+dj-database-url==2.3.0
+python-dotenv==1.2.1
+huggingface_hub==1.4.1
