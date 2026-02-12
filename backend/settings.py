@@ -174,8 +174,20 @@ if not CORS_ALLOW_ALL_ORIGINS:
         'DJANGO_CORS_ALLOWED_ORIGINS',
         'http://localhost:3000,http://127.0.0.1:3000',
     )
+    default_cors_regexes = r'^https://.*\.vercel\.app$' if not DEBUG else ''
+    cors_allowed_origin_regexes = env_list(
+        'DJANGO_CORS_ALLOWED_ORIGIN_REGEXES',
+        default_cors_regexes,
+    )
+    if cors_allowed_origin_regexes:
+        CORS_ALLOWED_ORIGIN_REGEXES = cors_allowed_origin_regexes
 CORS_ALLOW_CREDENTIALS = True
-CSRF_TRUSTED_ORIGINS = env_list('DJANGO_CSRF_TRUSTED_ORIGINS', '')
+default_csrf_trusted_origins = 'http://localhost:3000,http://127.0.0.1:3000'
+if not DEBUG:
+    default_csrf_trusted_origins = (
+        'https://*.vercel.app,http://localhost:3000,http://127.0.0.1:3000'
+    )
+CSRF_TRUSTED_ORIGINS = env_list('DJANGO_CSRF_TRUSTED_ORIGINS', default_csrf_trusted_origins)
 
 if not DEBUG:
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
